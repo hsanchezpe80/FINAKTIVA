@@ -1,15 +1,12 @@
 
 Infraestructura como Código para Cluster Fargate en AWS
-Este proyecto implementa un clúster de AWS Fargate con alta disponibilidad utilizando Terraform como herramienta de Infraestructura como Código (IaC) y GitLab para la implementación de CI/CD.
-Arquitectura del Proyecto
-Show Image
+Este proyecto implementa un clúster de AWS Fargate con alta disponibilidad utilizando Terraform como herramienta de Infraestructura como Código (IaC) 
 La arquitectura implementada consta de:
 
 VPC personalizada con subredes públicas y privadas distribuidas en múltiples zonas de disponibilidad
 Clúster ECS Fargate para ejecución de contenedores sin administración de servidores
 ECR para almacenamiento de imágenes Docker
 ALB (Application Load Balancer) para distribución de tráfico HTTPS (puerto 443)
-AWS Certificate Manager para gestión de certificados SSL/TLS
 Security Groups para control de acceso basado en IP
 CloudWatch para monitoreo y configuración de alarmas para auto-escalado
 
@@ -28,19 +25,6 @@ Desventajas de Terraform:
 No permite programación orientada a objetos como CDK
 Gestión de estado puede ser compleja en equipos grandes (aunque se resuelve con backend remoto)
 No se integra tan naturalmente con herramientas de AWS como CDK
-
-GitLab CI/CD
-Ventajas:
-
-Integración completa: Sistema todo-en-uno con control de código, CI/CD y gestión de artefactos
-Pipeline como código: Permite versionar la configuración de despliegue junto con el código
-Variables de entorno seguras: Gestión robusta de secretos y configuraciones por entorno
-Runners auto-escalables: Puede escalar automáticamente para manejar cargas de trabajo variables
-
-Desventajas:
-
-Mayor complejidad en comparación con sistemas más simples como GitHub Actions
-Puede requerir recursos dedicados para ejecutar los runners
 
 Estructura del Proyecto
 .
@@ -87,28 +71,27 @@ Estructura del Proyecto
 │   └── app2/
 │       ├── Dockerfile
 │       └── src/
-└── .gitlab-ci.yml
+
+
 Requisitos Previos
 
 Cuenta de AWS con permisos administrativos
 Terraform v1.0.0 o superior
-GitLab Runner configurado
+Docker CE
+
 AWS CLI configurado localmente para pruebas
 
 Configuración
-1. Variables de Entorno
-Configura las siguientes variables de entorno en GitLab CI/CD:
 
 AWS_ACCESS_KEY_ID: Clave de acceso para AWS
 AWS_SECRET_ACCESS_KEY: Clave secreta para AWS
-TF_VAR_allowed_ips: Lista de IPs permitidas para acceso (Formato CSV)
+
 
 2. Configuración de Entornos
 Edita los archivos terraform/environments/*/terraform.tfvars para configurar los parámetros específicos de cada entorno como:
 
 CIDR blocks para VPC y subredes
 Número de tareas por servicio
-Tipo de despliegue (blue/green, rolling, etc.)
 Umbral de CPU para auto-escalado
 
 
@@ -170,6 +153,41 @@ backend53.tf: Configuración del backend S3
 
 
 
-login ecr
+para ejecutar el proyecto
 
-aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-2.amazonaws.com
+descargar el repo
+
+https://github.com/hsanchezpe80/FINAKTIVA.git
+
+en la carpeta raiz ejecutar
+
+sh script.sh
+
+NOTA: SISE TIENE PROBLEMAS CON LA CREACION DEL BUCKET POR EL NOMBRE COLOCARLE A CADA BUCKET UN NUMERO PARA QUE LO PERMITA AL FINAL EJE 01,02
+
+luego
+construircontainer.sh
+
+luego ingresar ala carpeta terraform-iac
+
+-----ejecutar el init
+
+terraform init \                                          
+  -backend-config="bucket=finaktiva-terraform-state-dev" \
+  -backend-config="key=ecs-fargate/terraform.tfstate" \
+  -backend-config="region=us-east-2" \
+  -backend-config="dynamodb_table=terraform-state-lock"
+
+-------para ejecutar el plan
+
+terraform plan -var-file=ambientes/dev/terraform.tfvars    
+
+------para ejecutar el apply
+
+  terraform apply -var-file=ambientes/dev/terraform.tfvars    
+
+
+
+probar el balanceador
+
+curl http://dev-alb-399478373.us-east-1.elb.amazonaws.com/
