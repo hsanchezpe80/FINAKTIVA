@@ -50,10 +50,7 @@ variable "allowed_ips" {
   default     = ["0.0.0.0/0"]
 }
 
-variable "certificate_domain" {
-  description = "Domain name for ACM certificate"
-  type        = string
-}
+
 
 variable "deployment_strategy" {
   description = "Deployment strategy (BLUE_GREEN or ROLLING)"
@@ -81,4 +78,9 @@ variable "cpu_threshold" {
   description = "CPU threshold percentage for auto-scaling"
   type        = number
   default     = 75
+}
+
+variable "project_name" {
+  description = "Nombre del proyecto"
+  type        = string
 }

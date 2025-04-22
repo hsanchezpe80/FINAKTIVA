@@ -18,7 +18,3 @@ output "target_groups" {
   value       = aws_alb_target_group.app[*].arn
 }
 
-output "https_listener_arn" {
-  description = "ARN of the HTTPS listener"
-  value       = aws_alb_listener.https.arn
-}

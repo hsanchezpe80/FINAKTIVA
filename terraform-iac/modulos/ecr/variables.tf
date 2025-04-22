@@ -1,9 +1,9 @@
 variable "environment" {
-  description = "Environment name (dev, stg, prod)"
+  description = "Entorno de despliegue"
   type        = string
 }
 
 variable "app_names" {
-  description = "Names of the applications to deploy"
+  description = "Nombres de las aplicaciones"
   type        = list(string)
 }

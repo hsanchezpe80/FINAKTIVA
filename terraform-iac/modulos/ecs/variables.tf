@@ -1,63 +1,69 @@
 variable "environment" {
-  description = "Environment name (dev, stg, prod)"
+  description = "Entorno de despliegue"
   type        = string
 }
 
+variable "aws_region" {
+  description = "Región de AWS"
+  type        = string
+}
+
+variable "app_names" {
+  description = "Nombres de las aplicaciones"
+  type        = list(string)
+}
+
 variable "vpc_id" {
-  description = "ID of the VPC"
+  description = "ID de la VPC"
   type        = string
 }
 
 variable "private_subnets" {
-  description = "List of private subnet IDs"
-  type        = list(string)
-}
-
-variable "app_names" {
-  description = "Names of the applications to deploy"
+  description = "Subnets privadas para ECS"
   type        = list(string)
 }
 
 variable "ecr_repositories" {
-  description = "URLs of the ECR repositories"
+  description = "URLs de los repositorios ECR"
   type        = list(string)
-}
-
-variable "ecs_task_security_group" {
-  description = "Security group ID for ECS tasks"
-  type        = string
-}
-
-variable "alb_security_group" {
-  description = "Security group ID for ALB"
-  type        = string
 }
 
 variable "target_groups" {
-  description = "ARNs of target groups for the ALB"
+  description = "ARNs de los target groups"
   type        = list(string)
 }
 
-variable "deployment_strategy" {
-  description = "Deployment strategy (BLUE_GREEN or ROLLING)"
+variable "ecs_tasks_security_group" {
+  description = "Security group para las tareas de ECS"
   type        = string
-  default     = "ROLLING"
 }
 
 variable "min_capacity" {
-  description = "Minimum number of tasks per service"
+  description = "Número mínimo de tareas"
   type        = number
   default     = 2
 }
 
 variable "max_capacity" {
-  description = "Maximum number of tasks per service for auto-scaling"
+  description = "Número máximo de tareas"
   type        = number
   default     = 10
 }
 
 variable "cpu_threshold" {
-  description = "CPU threshold percentage for auto-scaling"
+  description = "Umbral de CPU para auto-scaling"
   type        = number
   default     = 75
+}
+
+variable "task_cpu" {
+  description = "Unidades de CPU para la tarea"
+  type        = number
+  default     = 256
+}
+
+variable "task_memory" {
+  description = "Memoria en MB para la tarea"
+  type        = number
+  default     = 512
 }

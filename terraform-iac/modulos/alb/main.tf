@@ -1,5 +1,5 @@
 # Application Load Balancer
-resource "aws_alb" "main" {  # Cambiar a aws_alb en lugar de aws_lb
+resource "aws_alb" "main" {
   name                       = "${var.environment}-alb"
   internal                   = false
   load_balancer_type         = "application"
@@ -15,7 +15,7 @@ resource "aws_alb" "main" {  # Cambiar a aws_alb en lugar de aws_lb
 }
 
 # Target groups para cada aplicación
-resource "aws_alb_target_group" "app" {  # Cambiar a aws_alb_target_group
+resource "aws_alb_target_group" "app" {
   count       = length(var.app_names)
   name        = "${var.environment}-${var.app_names[count.index]}-tg"
   port        = 8080
@@ -44,28 +44,22 @@ resource "aws_alb_target_group" "app" {  # Cambiar a aws_alb_target_group
   }
 }
 
-# HTTPS Listener (puerto 443)
-resource "aws_alb_listener" "https" {  # Cambiar a aws_alb_listener
+# HTTP Listener (puerto 80)
+resource "aws_alb_listener" "app" {
   load_balancer_arn = aws_alb.main.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-2016-08"
-  certificate_arn   = var.acm_certificate_arn
+  port              = 80
+  protocol          = "HTTP"
 
   default_action {
-    type = "fixed-response"
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "Not Found"
-      status_code  = "404"
-    }
+    type             = "forward"
+    target_group_arn = aws_alb_target_group.app[0].arn  # Usar el primer target group por defecto
   }
 }
 
 # Reglas del listener para cada aplicación
-resource "aws_alb_listener_rule" "app" {  # Cambiar a aws_alb_listener_rule
+resource "aws_alb_listener_rule" "app" {
   count        = length(var.app_names)
-  listener_arn = aws_alb_listener.https.arn
+  listener_arn = aws_alb_listener.app.arn  # Cambiar a .app en lugar de .https
   priority     = 100 + count.index
 
   action {
@@ -76,22 +70,6 @@ resource "aws_alb_listener_rule" "app" {  # Cambiar a aws_alb_listener_rule
   condition {
     path_pattern {
       values = ["/${var.app_names[count.index]}*"]
-    }
-  }
-}
-
-# Redirección HTTP a HTTPS
-resource "aws_alb_listener" "http_redirect" {  # Cambiar a aws_alb_listener
-  load_balancer_arn = aws_alb.main.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = "redirect"
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
     }
   }
 }

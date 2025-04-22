@@ -14,7 +14,7 @@ variable "allowed_ips" {
   default     = ["0.0.0.0/0"]
 }
 
-variable "certificate_domain" {
-  description = "Domain name for ACM certificate"
+variable "project_name" {
+  description = "Nombre del proyecto"
   type        = string
 }

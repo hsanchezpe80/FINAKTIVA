@@ -18,13 +18,7 @@ variable "alb_security_group" {
   type        = string
 }
 
-variable "acm_certificate_arn" {
-  description = "ARN of the ACM certificate"
-  type        = string
-}
-
 variable "app_names" {
-  description = "Names of the applications to deploy"
+  description = "Nombres de las aplicaciones"
   type        = list(string)
-  default     = ["app1", "app2"]
 }

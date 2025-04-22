@@ -1,29 +1,27 @@
 # Security Group para el ALB
 resource "aws_security_group" "alb" {
-  name        = "${var.environment}-alb-sg"
+  name_prefix = "${var.project_name}-alb-sg-${var.environment}"
   description = "Security group for ALB"
   vpc_id      = var.vpc_id
 
-  # Permitir acceso HTTPS desde IPs específicas
   ingress {
-    from_port   = 443
-    to_port     = 443
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = var.allowed_ips
-    description = "HTTPS access from allowed IPs"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Permitir todo el tráfico de salida
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow all outbound traffic"
   }
 
   tags = {
-    Name = "${var.environment}-alb-sg"
+    Name        = "${var.project_name}-alb-sg-${var.environment}"
+    Environment = var.environment
   }
 }
 
@@ -55,25 +53,4 @@ resource "aws_security_group" "ecs_tasks" {
   tags = {
     Name = "${var.environment}-ecs-tasks-sg"
   }
-}
-
-# Certificado SSL/TLS para HTTPS
-resource "aws_acm_certificate" "main" {
-  domain_name       = var.certificate_domain
-  validation_method = "DNS"
-
-  lifecycle {
-    create_before_destroy = true
-  }
-
-  tags = {
-    Name        = "${var.environment}-certificate"
-    Environment = var.environment
-  }
-}
-
-# Validación del certificado
-# Este recurso simula la validación completada para entornos de prueba
-resource "aws_acm_certificate_validation" "main" {
-  certificate_arn = aws_acm_certificate.main.arn
 }
