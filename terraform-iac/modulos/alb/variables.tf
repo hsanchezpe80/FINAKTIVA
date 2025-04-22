@@ -27,5 +27,4 @@ variable "app_names" {
   description = "Names of the applications to deploy"
   type        = list(string)
   default     = ["app1", "app2"]
-  
 }

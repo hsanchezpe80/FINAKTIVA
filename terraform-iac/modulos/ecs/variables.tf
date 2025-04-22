@@ -57,7 +57,7 @@ variable "max_capacity" {
 }
 
 variable "cpu_threshold" {
-  description = "CPU threshold percentage for auto-scaling container"
+  description = "CPU threshold percentage for auto-scaling"
   type        = number
   default     = 75
 }

@@ -1,0 +1,153 @@
+Guía de Ejecución del Proyecto FINAKTIVA
+Prerrequisitos
+
+Cuenta de AWS con permisos administrativos
+AWS CLI configurado localmente
+Terraform instalado (versión 1.0.0 o superior)
+Docker instalado
+Git instalado
+Cuenta de GitHub y acceso al repositorio
+
+Paso 1: Configuración Inicial de AWS
+1.1 Crear buckets S3 para el estado de Terraform
+bash# Crear buckets para cada ambiente
+aws s3 mb s3://finaktiva-terraform-state-dev --region us-east-2
+aws s3 mb s3://finaktiva-terraform-state-stg --region us-east-1
+aws s3 mb s3://finaktiva-terraform-state-prod --region us-west-2
+
+# Habilitar versionado
+aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-dev --versioning-configuration Status=Enabled
+aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-stg --versioning-configuration Status=Enabled
+aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-prod --versioning-configuration Status=Enabled
+1.2 Crear tabla DynamoDB para el bloqueo de estado
+bashaws dynamodb create-table \
+    --table-name terraform-state-lock \
+    --attribute-definitions AttributeName=LockID,AttributeType=S \
+    --key-schema AttributeName=LockID,KeyType=HASH \
+    --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+    --region us-east-1
+Paso 2: Configuración del Repositorio GitHub
+2.1 Clonar o crear el repositorio
+bashgit clone https://github.com/tu-usuario/finaktiva-devops-challenge.git
+cd finaktiva-devops-challenge
+2.2 Configurar secretos en GitHub
+En GitHub, ve a "Settings" > "Secrets and variables" > "Actions" y añade:
+
+AWS_ACCESS_KEY_ID: Tu AWS Access Key ID
+AWS_SECRET_ACCESS_KEY: Tu AWS Secret Access Key
+AWS_ACCOUNT_ID: Tu ID de cuenta AWS
+
+2.3 Estructura de branches
+
+develop: Para desarrollo (despliega en región us-east-2)
+staging: Para pruebas (despliega en región us-east-1)
+main: Para producción (despliega en región us-west-2)
+
+Paso 3: Primera Ejecución (Local)
+3.1 Crear repositorios ECR iniciales
+bash# Crear repositorios ECR manualmente para poder subir las imágenes
+aws ecr create-repository --repository-name dev-api-service --region us-east-2
+aws ecr create-repository --repository-name dev-worker-service --region us-east-2
+3.2 Construir y subir imágenes iniciales
+bash# Autenticarse en ECR
+aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-2.amazonaws.com
+
+# Construir y subir app1
+cd apps/app1
+docker build -t dev-api-service .
+docker tag dev-api-service:latest $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-2.amazonaws.com/dev-api-service:latest
+docker push $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-2.amazonaws.com/dev-api-service:latest
+
+# Construir y subir app2
+cd ../app2
+docker build -t dev-worker-service .
+docker tag dev-worker-service:latest $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-2.amazonaws.com/dev-worker-service:latest
+docker push $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-2.amazonaws.com/dev-worker-service:latest
+
+cd ../..
+3.3 Desplegar infraestructura con Terraform
+bashcd terraform-iac
+
+# Inicializar Terraform
+terraform init \
+  -backend-config="bucket=finaktiva-terraform-state-dev" \
+  -backend-config="key=ecs-fargate/terraform.tfstate" \
+  -backend-config="region=us-east-2" \
+  -backend-config="dynamodb_table=terraform-state-lock"
+
+# Crear workspace para desarrollo
+terraform workspace new dev || terraform workspace select dev
+
+# Planificar cambios
+terraform plan -var-file=ambientes/dev/terraform.tfvars
+
+# Aplicar cambios
+terraform apply -var-file=ambientes/dev/terraform.tfvars
+Paso 4: Flujo de CI/CD con GitHub Actions
+4.1 Desarrollo
+
+Crea una rama feature desde develop
+Realiza los cambios necesarios
+Haz push y crea un Pull Request hacia develop
+GitHub Actions ejecutará las validaciones
+Una vez aprobado y mergeado, se desplegará automáticamente en desarrollo
+
+4.2 Staging
+
+Crea un Pull Request de develop a staging
+Se ejecutan las validaciones
+Al mergear, se despliega automáticamente en staging
+
+4.3 Producción
+
+Crea un Pull Request de staging a main
+Requiere aprobación manual
+Al mergear, se despliega automáticamente en producción
+
+Paso 5: Verificación Post-Despliegue
+5.1 Verificar servicios ECS
+bash# Obtener el estado de los servicios
+aws ecs list-services --cluster dev-cluster --region us-east-2
+aws ecs describe-services --cluster dev-cluster --services $(aws ecs list-services --cluster dev-cluster --query 'serviceArns[]' --output text) --region us-east-2
+5.2 Obtener URL del Load Balancer
+bash# Obtener DNS del ALB
+aws elbv2 describe-load-balancers --query "LoadBalancers[?LoadBalancerName=='dev-alb'].DNSName" --output text --region us-east-2
+5.3 Probar endpoints
+bash# Probar health check
+curl -k https://<alb-dns-name>/health
+
+# Probar endpoints de las aplicaciones
+curl -k https://<alb-dns-name>/api/data
+curl -k -X POST https://<alb-dns-name>/api/process
+Paso 6: Monitoreo y Mantenimiento
+6.1 Revisar logs
+bash# Ver logs de la aplicación en CloudWatch
+aws logs get-log-events --log-group-name /ecs/dev/api-service --log-stream-name <stream-name> --region us-east-2
+6.2 Monitorear métricas
+
+Accede a CloudWatch en la consola de AWS
+Revisa las métricas de ECS, especialmente CPU y memoria
+Verifica las alarmas configuradas para auto-scaling
+
+Resolución de Problemas Comunes
+Error: El certificado ACM no se valida
+
+Verifica que hayas configurado correctamente los registros DNS
+Si usas Route53, asegúrate de que los registros de validación estén creados
+
+Error: Las tareas no inician
+
+Revisa los logs de CloudWatch para el servicio
+Verifica que las imágenes existan en ECR
+Comprueba los grupos de seguridad
+
+Error: Terraform state lock
+bash# En caso de bloqueo, puedes forzar la liberación
+aws dynamodb delete-item \
+    --table-name terraform-state-lock \
+    --key '{"LockID": {"S": "finaktiva-terraform-state-dev/ecs-fargate/terraform.tfstate"}}'
+Limpieza (Opcional)
+Para destruir toda la infraestructura:
+bashcd terraform-iac
+terraform destroy -var-file=ambientes/dev/terraform.tfvars
+Nota: Asegúrate de eliminar los recursos en orden inverso a su creación para evitar errores de dependencias.
