@@ -16,6 +16,16 @@ on:
           - dev
           - stg
           - prod
+      skip_terraform:
+        description: 'Omitir la ejecución de Terraform'
+        required: false
+        default: false
+        type: boolean
+      build_only:
+        description: 'Solo construir imágenes sin aplicar cambios'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   deploy:
@@ -49,12 +59,14 @@ jobs:
           echo "Región: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
       
       - name: Instalar Terraform
+        if: ${{ github.event.inputs.skip_terraform != 'true' }}
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.4.6
       
       # PASO 1: Configurar buckets para Terraform state
       - name: Crear y configurar buckets para Terraform state
+        if: ${{ github.event.inputs.skip_terraform != 'true' }}
         run: |
           # Definir la región correcta según el ambiente
           REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
@@ -99,6 +111,7 @@ jobs:
       
       # PASO 3: Configurar módulo ECR
       - name: Configurar módulo ECR
+        if: ${{ github.event.inputs.skip_terraform != 'true' }}
         run: |
           ECR_MODULE_DIR="docs/terraform-iac/terraform/modulos/ecr"
           mkdir -p $ECR_MODULE_DIR
@@ -197,6 +210,7 @@ jobs:
       
       # PASO 6: Preparar y ejecutar Terraform
       - name: Preparar archivos de Terraform
+        if: ${{ github.event.inputs.skip_terraform != 'true' }}
         run: |
           TERRAFORM_DIR="docs/terraform-iac/terraform"
           mkdir -p $TERRAFORM_DIR
@@ -246,6 +260,7 @@ jobs:
           fi
       
       - name: Inicializar Terraform
+        if: ${{ github.event.inputs.skip_terraform != 'true' }}
         run: |
           cd docs/terraform-iac/terraform
           REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
@@ -257,6 +272,7 @@ jobs:
             -backend-config="dynamodb_table=terraform-state-lock"
       
       - name: Plan de Terraform
+        if: ${{ github.event.inputs.skip_terraform != 'true' }}
         run: |
           cd docs/terraform-iac/terraform
           REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
@@ -268,11 +284,21 @@ jobs:
             -out=tfplan
       
       # Solo aplica en push a ramas principales o en dispatch manual, no en PRs
+      # También se puede omitir con la opción build_only
       - name: Aplicar Terraform
-        if: github.event_name != 'pull_request'
+        if: ${{ github.event.inputs.skip_terraform != 'true' && github.event.inputs.build_only != 'true' && (github.event_name != 'pull_request') }}
         run: |
           cd docs/terraform-iac/terraform
           terraform apply -auto-approve tfplan
       
       - name: Notificar completado
-        run: echo "Pipeline completado exitosamente para ambiente ${{ env.ENV }}"
+        run: |
+          echo "Pipeline completado exitosamente para ambiente ${{ env.ENV }}"
+          echo "Región: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          if [ "${{ github.event.inputs.build_only }}" = "true" ]; then
+            echo "Modo: Solo construcción de imágenes (sin aplicar cambios de infraestructura)"
+          elif [ "${{ github.event.inputs.skip_terraform }}" = "true" ]; then
+            echo "Modo: Omitiendo pasos de Terraform"
+          else
+            echo "Modo: Despliegue completo"
+          fi
