@@ -299,12 +299,21 @@ jobs:
         run: |
           cd docs/terraform-iac/terraform
           
+          # Ejecutar el plan y mostrar detalladamente los recursos que se crearán
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-            -out=tfplan
-            
+            -out=tfplan \
+            -detailed-exitcode \
+            -input=false
+          
+          # Mostrar un resumen de los recursos que se crearán/modificarán/eliminarán
+          echo "============================================================"
+          echo "RESUMEN DE RECURSOS A MODIFICAR:"
+          echo "============================================================"
+          terraform show -no-color tfplan | grep -E '(^# |^  # |will be created|will be destroyed|will be updated)' || echo "No se detectaron cambios en los recursos"
+          
           # Si es solo plan, mostramos un mensaje explicativo
           if [ "${{ env.TF_ACTION }}" = "plan" ]; then
             echo "============================================================"
