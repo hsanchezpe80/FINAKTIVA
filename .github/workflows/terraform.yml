@@ -30,6 +30,11 @@ jobs:
     name: "Terraform"
     runs-on: ubuntu-latest
     
+    # Especifica el directorio donde se encuentran los archivos de Terraform
+    defaults:
+      run:
+        working-directory: ./terraform-iac
+    
     permissions:
       contents: read
       pull-requests: write
@@ -40,16 +45,12 @@ jobs:
 
       - name: Check Repository Structure
         run: |
-          echo "Listing repository root:"
+          echo "Current working directory:"
+          pwd
+          echo "Listing current directory:"
           ls -la
-          echo "Checking if ambientes/dev directory exists:"
-          if [ ! -d "ambientes/dev" ]; then
-            echo "Directory does not exist, creating it"
-            mkdir -p ambientes/dev
-          else
-            echo "Directory exists"
-            ls -la ambientes/dev
-          fi
+          echo "Listing ambientes/dev directory:"
+          ls -la ambientes/dev || echo "Directory not found"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -68,17 +69,6 @@ jobs:
       # Verifica que las credenciales AWS estén funcionando
       - name: Verify AWS credentials
         run: aws sts get-caller-identity
-
-      # Crea el archivo de variables si no existe - sintaxis corregida
-      - name: Ensure terraform.tfvars exists
-        run: |
-          if [ ! -f "ambientes/dev/terraform.tfvars" ]; then
-            echo "Creating default terraform.tfvars file"
-            echo '# Variables para el entorno dev' > ambientes/dev/terraform.tfvars
-            echo 'aws_region = "us-east-2"' >> ambientes/dev/terraform.tfvars
-            echo 'environment = "dev"' >> ambientes/dev/terraform.tfvars
-            echo '# Añade aquí más variables según sea necesario' >> ambientes/dev/terraform.tfvars
-          fi
 
       - name: Terraform Init
         id: init
@@ -102,7 +92,6 @@ jobs:
         id: plan
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
         run: terraform plan -var-file=ambientes/dev/terraform.tfvars -out=tfplan
-        continue-on-error: true
 
       - name: Update Pull Request
         uses: actions/github-script@v6
