@@ -41,30 +41,47 @@ jobs:
       # Por defecto usa 'dev' para develop branch, 'prod' para main, o el input manual
       ENV: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || 'dev' }}
       REGION_DEV: us-east-2
+      REGION_STG: us-east-2
       REGION_PROD: us-west-2
-      BUCKET_REGION: us-east-2  # Región específica para los buckets S3 de estado
+      BUCKET_REGION_DEV: us-east-2
+      BUCKET_REGION_STG: us-east-2
+      BUCKET_REGION_PROD: us-west-2
       TF_ACTION: ${{ github.event.inputs.terraform_action || 'plan' }}
       
     steps:
       - name: Checkout del código
         uses: actions/checkout@v3
       
+      - name: Configurar variables de región
+        run: |
+          # Definir la región de despliegue según el ambiente
+          if [ "${{ env.ENV }}" = "prod" ]; then
+            echo "DEPLOY_REGION=${{ env.REGION_PROD }}" >> $GITHUB_ENV
+            echo "STATE_BUCKET_REGION=${{ env.BUCKET_REGION_PROD }}" >> $GITHUB_ENV
+          elif [ "${{ env.ENV }}" = "stg" ]; then
+            echo "DEPLOY_REGION=${{ env.REGION_STG }}" >> $GITHUB_ENV
+            echo "STATE_BUCKET_REGION=${{ env.BUCKET_REGION_STG }}" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_REGION=${{ env.REGION_DEV }}" >> $GITHUB_ENV
+            echo "STATE_BUCKET_REGION=${{ env.BUCKET_REGION_DEV }}" >> $GITHUB_ENV
+          fi
+          
+          echo "Ambiente: ${{ env.ENV }}"
+          echo "Región de despliegue: $DEPLOY_REGION"
+          echo "Región del bucket de estado: $STATE_BUCKET_REGION"
+      
       - name: Configurar AWS CLI
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}
+          aws-region: ${{ env.DEPLOY_REGION }}
       
       - name: Obtener ID de cuenta AWS
         id: aws-account
         run: |
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
-          echo "Ambiente: ${{ env.ENV }}"
-          echo "Región de despliegue: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
-          echo "Región de buckets S3: ${{ env.BUCKET_REGION }}"
-          echo "Acción Terraform: ${{ env.TF_ACTION }}"
       
       - name: Instalar Terraform
         uses: hashicorp/setup-terraform@v2
@@ -76,39 +93,46 @@ jobs:
         run: |
           echo "=== Creando buckets para Terraform state ==="
           
-          # Crear buckets en la región correcta
-          aws s3 mb s3://finaktiva-terraform-state-dev --region ${{ env.BUCKET_REGION }} || true
-          aws s3 mb s3://finaktiva-terraform-state-stg --region ${{ env.BUCKET_REGION }} || true
-          aws s3 mb s3://finaktiva-terraform-state-prod --region ${{ env.BUCKET_REGION }} || true
+          # Crear buckets en sus regiones respectivas
+          aws s3 mb s3://finaktiva-terraform-state-dev --region ${{ env.BUCKET_REGION_DEV }} || true
+          aws s3 mb s3://finaktiva-terraform-state-stg --region ${{ env.BUCKET_REGION_STG }} || true
+          aws s3 mb s3://finaktiva-terraform-state-prod --region ${{ env.BUCKET_REGION_PROD }} || true
           
           # Habilitar versionado
-          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-dev --versioning-configuration Status=Enabled
-          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-stg --versioning-configuration Status=Enabled
-          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-prod --versioning-configuration Status=Enabled
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-dev --versioning-configuration Status=Enabled --region ${{ env.BUCKET_REGION_DEV }}
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-stg --versioning-configuration Status=Enabled --region ${{ env.BUCKET_REGION_STG }}
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-prod --versioning-configuration Status=Enabled --region ${{ env.BUCKET_REGION_PROD }}
           
-          # Crear tabla DynamoDB para lock (ignorar errores si ya existe)
-          aws dynamodb create-table \
-              --table-name terraform-state-lock \
-              --attribute-definitions AttributeName=LockID,AttributeType=S \
-              --key-schema AttributeName=LockID,KeyType=HASH \
-              --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
-              --region ${{ env.BUCKET_REGION }} || true
+          # Crear tabla DynamoDB para lock
+          if [ "${{ env.ENV }}" = "prod" ]; then
+            aws dynamodb create-table \
+                --table-name terraform-state-lock \
+                --attribute-definitions AttributeName=LockID,AttributeType=S \
+                --key-schema AttributeName=LockID,KeyType=HASH \
+                --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+                --region ${{ env.BUCKET_REGION_PROD }} || true
+          else
+            aws dynamodb create-table \
+                --table-name terraform-state-lock \
+                --attribute-definitions AttributeName=LockID,AttributeType=S \
+                --key-schema AttributeName=LockID,KeyType=HASH \
+                --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+                --region ${{ env.BUCKET_REGION_DEV }} || true
+          fi
               
           echo "=== Configuración de Terraform state completada ==="
       
       # PASO 2: Crear repositorios ECR
       - name: Crear repositorios ECR
         run: |
-          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
-          
           echo "=== Creando repositorios ECR ==="
           
           # Crear repositorios con nombres que coincidan con el módulo Terraform
-          aws ecr delete-repository --repository-name ${{ env.ENV }}-app1 --force || true
-          aws ecr delete-repository --repository-name ${{ env.ENV }}-app2 --force || true
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-app1 --force --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-app2 --force --region ${{ env.DEPLOY_REGION }} || true
           
-          aws ecr create-repository --repository-name ${{ env.ENV }}-app1 --region $REGION || true
-          aws ecr create-repository --repository-name ${{ env.ENV }}-app2 --region $REGION || true
+          aws ecr create-repository --repository-name ${{ env.ENV }}-app1 --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr create-repository --repository-name ${{ env.ENV }}-app2 --region ${{ env.DEPLOY_REGION }} || true
           
           echo "=== Repositorios ECR creados correctamente ==="
       
@@ -196,8 +220,7 @@ jobs:
         if: ${{ github.event.inputs.skip_image_build != 'true' }}
         id: ecr-login
         run: |
-          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
-          aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.$REGION.amazonaws.com
+          aws ecr get-login-password --region ${{ env.DEPLOY_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.DEPLOY_REGION }}.amazonaws.com
       
       - name: Construir y publicar imagen app1
         if: ${{ github.event.inputs.skip_image_build != 'true' }}
@@ -205,7 +228,7 @@ jobs:
         with:
           context: ./apps/app1
           push: true
-          tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}.amazonaws.com/${{ env.ENV }}-app1:latest
+          tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.DEPLOY_REGION }}.amazonaws.com/${{ env.ENV }}-app1:latest
       
       - name: Construir y publicar imagen app2
         if: ${{ github.event.inputs.skip_image_build != 'true' }}
@@ -213,7 +236,7 @@ jobs:
         with:
           context: ./apps/app2
           push: true
-          tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}.amazonaws.com/${{ env.ENV }}-app2:latest
+          tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.DEPLOY_REGION }}.amazonaws.com/${{ env.ENV }}-app2:latest
       
       # PASO 6: Preparar y ejecutar Terraform
       - name: Preparar archivos de Terraform
@@ -257,34 +280,28 @@ jobs:
           mkdir -p $TERRAFORM_DIR/ambientes/${{ env.ENV }}
           
           # Crear el archivo terraform.tfvars
-          if [ "${{ env.ENV }}" = "prod" ]; then
-            echo "environment = \"prod\"" > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
-            echo "region = \"${{ env.REGION_PROD }}\"" >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
-          else
-            echo "environment = \"${{ env.ENV }}\"" > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
-            echo "region = \"${{ env.REGION_DEV }}\"" >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
-          fi
+          echo "environment = \"${{ env.ENV }}\"" > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+          echo "region = \"${{ env.DEPLOY_REGION }}\"" >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
       
       - name: Inicializar Terraform
         run: |
           cd docs/terraform-iac/terraform
           
-          # Usamos la región específica para el bucket de estado
+          # Usamos la región específica para el bucket de estado según el ambiente
           terraform init \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
-            -backend-config="region=${{ env.BUCKET_REGION }}" \
+            -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
             -backend-config="dynamodb_table=terraform-state-lock"
       
       - name: Plan de Terraform
         if: ${{ env.TF_ACTION == 'plan' || env.TF_ACTION == 'apply' }}
         run: |
           cd docs/terraform-iac/terraform
-          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
           
           terraform plan \
             -var="environment=${{ env.ENV }}" \
-            -var="region=$REGION" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
             -out=tfplan
             
@@ -311,7 +328,6 @@ jobs:
         if: ${{ env.TF_ACTION == 'destroy' && github.event_name != 'pull_request' }}
         run: |
           cd docs/terraform-iac/terraform
-          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
           
           echo "============================================================"
           echo "ATENCIÓN: Se destruirá toda la infraestructura en ambiente ${{ env.ENV }}."
@@ -319,7 +335,7 @@ jobs:
           
           terraform destroy -auto-approve \
             -var="environment=${{ env.ENV }}" \
-            -var="region=$REGION" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars"
       
       - name: Notificar completado
@@ -328,8 +344,8 @@ jobs:
           echo "Pipeline completado exitosamente"
           echo "============================================================"
           echo "Ambiente: ${{ env.ENV }}"
-          echo "Región para recursos: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
-          echo "Región para estado en S3: ${{ env.BUCKET_REGION }}"
+          echo "Región para recursos: ${{ env.DEPLOY_REGION }}"
+          echo "Región para estado en S3: ${{ env.STATE_BUCKET_REGION }}"
           echo "Acción ejecutada: ${{ env.TF_ACTION }}"
           if [ "${{ github.event.inputs.skip_image_build }}" = "true" ]; then
             echo "Se omitió la construcción de imágenes"
