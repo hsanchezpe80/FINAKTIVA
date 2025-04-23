@@ -299,20 +299,35 @@ jobs:
         run: |
           cd docs/terraform-iac/terraform
           
-          # Ejecutar el plan de Terraform y guardar la salida completa en un archivo
+          # Forzar reinicio del plan eliminando cualquier estado local
+          rm -f .terraform/terraform.tfstate .terraform/terraform.tfstate.backup || true
+          
+          # Regenerar los archivos de configuración de Terraform
+          terraform init -reconfigure \
+            -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
+            -backend-config="key=terraform.tfstate" \
+            -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-lock"
+          
+          # Ejecutar el plan de Terraform con output detallado y guardarlo
+          echo "Ejecutando terraform plan con opciones detalladas..."
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
             -out=tfplan \
-            -input=false | tee plan_output.txt
+            -input=false \
+            -refresh=true | tee plan_output.txt
           
-          # Verificar si hay cambios o no en la infraestructura
-          if grep -q "No changes" plan_output.txt; then
-            CHANGES_DETECTED=false
-            echo "============================================================"
-            echo "RESUMEN DE RECURSOS A MODIFICAR:"
-            echo "============================================================"
+          # Mostrar información de recursos
+          echo "============================================================"
+          echo "RESUMEN DE RECURSOS A MODIFICAR:"
+          echo "============================================================"
+          
+          # Buscar la línea de resumen del plan
+          PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
+          
+          if [ -z "$PLAN_SUMMARY" ] || echo "$PLAN_SUMMARY" | grep -q "No changes"; then
             echo "No se detectaron cambios en la infraestructura."
             echo ""
             echo "Resumen:"
@@ -320,24 +335,21 @@ jobs:
             echo "- Recursos a modificar: 0" 
             echo "- Recursos a eliminar: 0"
           else
-            CHANGES_DETECTED=true
-            echo "============================================================"
-            echo "RESUMEN DE RECURSOS A MODIFICAR:"
-            echo "============================================================"
-            
-            # Si hay cambios, utilizamos terraform show para mostrar los detalles completos
-            terraform show -no-color tfplan || true
-            
-            # Extraer y mostrar un resumen de recursos (con manejo de errores)
-            RESOURCES_TO_ADD=$(grep -c "will be created" plan_output.txt || echo 0)
-            RESOURCES_TO_CHANGE=$(grep -c "will be updated" plan_output.txt || echo 0)
-            RESOURCES_TO_DESTROY=$(grep -c "will be destroyed" plan_output.txt || echo 0)
-            
+            echo "Se detectaron cambios en la infraestructura."
             echo ""
-            echo "Resumen:"
-            echo "- Recursos a crear: $RESOURCES_TO_ADD"
-            echo "- Recursos a modificar: $RESOURCES_TO_CHANGE" 
-            echo "- Recursos a eliminar: $RESOURCES_TO_DESTROY"
+            echo "$PLAN_SUMMARY"
+            echo ""
+            echo "Detalle de recursos:"
+            echo ""
+            
+            # Mostrar los recursos que serán creados/modificados/eliminados
+            grep -A2 "# module\." plan_output.txt || true
+            grep "will be created" plan_output.txt || true
+            grep "will be updated" plan_output.txt || true
+            grep "will be destroyed" plan_output.txt || true
+            
+            # Intentar mostrar el contenido del plan si está disponible
+            terraform show -no-color tfplan || echo "No se pudo mostrar el detalle del plan"
           fi
           
           # Si es solo plan, mostramos un mensaje explicativo
