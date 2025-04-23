@@ -299,119 +299,107 @@ jobs:
         run: |
           cd docs/terraform-iac/terraform
           
-          # Primero limpiar completamente el directorio de terraform
+          # Limpiar completamente el directorio de terraform
           echo "Limpiando estado de Terraform..."
           rm -rf .terraform* terraform.tfstate* tfplan
           
-          # Hacer un backup del backend.tf original
-          if [ -f backend.tf ]; then
-            cp backend.tf backend.tf.bak
+          # Verificar si existen recursos reales en AWS
+          echo "============================================================"
+          echo "VERIFICACIÓN DE RECURSOS REALES EN AWS:"
+          echo "============================================================"
+          
+          echo "Verificando recursos ECS..."
+          CLUSTER_EXISTS=$(aws ecs list-clusters | grep -c "${{ env.ENV }}-cluster" || echo "0")
+          
+          echo "Verificando VPC..."
+          VPC_EXISTS=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.ENV }}-vpc" --query 'Vpcs[].VpcId' --output text | wc -w || echo "0")
+          
+          echo "Verificando ECR..."
+          ECR_EXISTS=$(aws ecr describe-repositories --query "repositories[?contains(repositoryName, '${{ env.ENV }}')].repositoryName" --output text | wc -w || echo "0")
+          
+          if [[ "$CLUSTER_EXISTS" == "0" && "$VPC_EXISTS" == "0" && "$ECR_EXISTS" -le "2" ]]; then
+            echo "NO SE DETECTARON RECURSOS PRINCIPALES CREADOS EN AWS."
+            echo "Parece que la infraestructura no ha sido desplegada todavía."
+            INFRASTRUCTURE_EXISTS=false
+          else
+            echo "SE DETECTARON RECURSOS EXISTENTES EN AWS:"
+            echo "- Clusters ECS: $CLUSTER_EXISTS"
+            echo "- VPC: $VPC_EXISTS"
+            echo "- Repositorios ECR relevantes: $ECR_EXISTS"
+            INFRASTRUCTURE_EXISTS=true
           fi
           
-          # Usar el backend S3 real para mostrar el estado actual
-          echo "Inicializando Terraform con backend S3..."
+          echo ""
+          echo "============================================================"
+          echo "ANÁLISIS DE ESTADO DE TERRAFORM:"
+          echo "============================================================"
+          
+          # Inicializar Terraform con backend S3
           terraform init \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
             -backend-config="dynamodb_table=terraform-state-lock"
           
-          # Ejecutar plan con backend S3 para ver estado actual
+          # Intentar ejecutar terraform state list para ver qué recursos conoce Terraform
+          echo "Recursos registrados en el estado de Terraform:"
+          terraform state list || echo "No se pudo obtener lista de recursos del estado."
+          
+          # Ejecutar plan con backend S3
+          echo ""
+          echo "============================================================"
+          echo "PLAN DE TERRAFORM CON ESTADO ACTUAL:"
+          echo "============================================================"
           echo "Ejecutando terraform plan con estado actual..."
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-            -out=tfplan_s3 \
-            -input=false | tee plan_s3_output.txt
+            -out=tfplan \
+            -input=false | tee plan_output.txt
           
-          # Guardar el resumen del plan con estado
-          PLAN_S3_SUMMARY=$(grep "Plan:" plan_s3_output.txt || echo "No se encontró resumen del plan con estado S3")
-          
-          echo "============================================================"
-          echo "RESUMEN DE RECURSOS A MODIFICAR (SEGÚN ESTADO ACTUAL):"
-          echo "============================================================"
-          
-          if grep -q "No changes" plan_s3_output.txt; then
-            echo "No se detectaron cambios en la infraestructura según el estado en S3."
-            echo ""
-            echo "Resumen:"
-            echo "- Recursos a crear: 0"
-            echo "- Recursos a modificar: 0" 
-            echo "- Recursos a eliminar: 0"
-            
+          # Verificar si hay cambios en el plan
+          if grep -q "No changes" plan_output.txt; then
             echo ""
             echo "============================================================"
-            echo "SIMULACIÓN DE INFRAESTRUCTURA COMPLETA (DESDE CERO):"
+            echo "RESULTADO DEL ANÁLISIS:"
             echo "============================================================"
-            echo "Para ver qué recursos existen actualmente en la infraestructura, ejecutaremos una simulación con un estado vacío."
-            echo ""
-            
-            # Limpiar nuevamente para forzar un nuevo plan
-            rm -rf .terraform* terraform.tfstate* tfplan_s3
-            
-            # Modificar temporalmente el backend a local
-            echo 'terraform {' > backend.tf
-            echo '  backend "local" {}' >> backend.tf
-            echo '}' >> backend.tf
-            
-            # Inicializar con backend local
-            echo "Inicializando con estado vacío para mostrar infraestructura completa..."
-            terraform init -force-copy
-            
-            # Ejecutar plan sin estado previo
-            terraform plan \
-              -var="environment=${{ env.ENV }}" \
-              -var="region=${{ env.DEPLOY_REGION }}" \
-              -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-              -input=false -out=tfplan_empty | tee plan_empty.txt
-            
-            # Extraer información del plan
-            PLAN_EMPTY_SUMMARY=$(grep "Plan:" plan_empty.txt || echo "No se pudo obtener simulación")
-            
-            echo "$PLAN_EMPTY_SUMMARY"
-            echo ""
-            echo "Esta simulación muestra los recursos que existen actualmente en la infraestructura."
-            echo "Estos recursos ya están desplegados según el estado en S3."
+            if [ "$INFRASTRUCTURE_EXISTS" = "true" ]; then
+              echo "CONCLUSIÓN: La infraestructura ya está desplegada y está sincronizada con el estado de Terraform."
+              echo "No hay cambios que aplicar."
+            else
+              echo "ADVERTENCIA: Terraform indica que no hay cambios para aplicar, pero no se detectaron recursos en AWS."
+              echo "Esto puede indicar un problema con el estado de Terraform o con los permisos para detectar recursos."
+              echo ""
+              echo "RECOMENDACIÓN: Ejecuta una de estas acciones:"
+              echo "1. Verifica manualmente en la consola de AWS si existen los recursos."
+              echo "2. Considera ejecutar 'terraform destroy' seguido de 'terraform apply' para asegurar la sincronización."
+              echo "3. Utiliza la opción 'terraform plan -refresh-only' localmente para verificar el estado."
+            fi
           else
-            echo "$PLAN_S3_SUMMARY"
+            # Extraer el resumen del plan
+            PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
             echo ""
-            echo "Hay cambios pendientes que se aplicarán en la infraestructura."
+            echo "============================================================"
+            echo "RESUMEN DE CAMBIOS A APLICAR:"
+            echo "============================================================"
+            echo "$PLAN_SUMMARY"
+            echo ""
             
-            # Extraer detalles de los recursos
-            echo "Detalle de recursos:"
-            grep -A2 "# module\." plan_s3_output.txt || echo "No se encontraron detalles de módulos"
-            grep "will be created" plan_s3_output.txt || echo "No se crearán recursos"
-            grep "will be updated" plan_s3_output.txt || echo "No se actualizarán recursos"
-            grep "will be destroyed" plan_s3_output.txt || echo "No se destruirán recursos"
-          fi
-          
-          # Restaurar el backend original para continuar con el workflow
-          if [ -f backend.tf.bak ]; then
-            mv backend.tf.bak backend.tf
-          else
-            # Si no hay backup, recreamos el archivo original
-            echo 'terraform {' > backend.tf
-            echo '  backend "s3" {' >> backend.tf
-            echo '    # Los valores específicos se pasan en la línea de comandos de init' >> backend.tf
-            echo '  }' >> backend.tf
-            echo '}' >> backend.tf
-          fi
-          
-          # Volver a inicializar con backend S3 para continuar el workflow
-          terraform init -reconfigure \
-            -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
-            -backend-config="key=terraform.tfstate" \
-            -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
-            -backend-config="dynamodb_table=terraform-state-lock" || true
-          
-          # Si hay un tfplan_s3, lo copiamos a tfplan para los siguientes pasos
-          if [ -f tfplan_s3 ]; then
-            cp tfplan_s3 tfplan
+            # Mostrar recursos que serán modificados
+            echo "Recursos a crear:"
+            grep "will be created" plan_output.txt || echo "Ninguno"
+            echo ""
+            echo "Recursos a actualizar:"
+            grep "will be updated" plan_output.txt || echo "Ninguno"
+            echo ""
+            echo "Recursos a destruir:"
+            grep "will be destroyed" plan_output.txt || echo "Ninguno"
           fi
           
           # Si es solo plan, mostramos un mensaje explicativo
           if [ "${{ env.TF_ACTION }}" = "plan" ]; then
+            echo ""
             echo "============================================================"
             echo "Plan de Terraform completado. No se aplicarán cambios."
             echo "Para aplicar estos cambios, ejecuta el workflow con la acción 'apply'."
