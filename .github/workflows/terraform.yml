@@ -40,8 +40,9 @@ jobs:
     env:
       # Por defecto usa 'dev' para develop branch, 'prod' para main, o el input manual
       ENV: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || 'dev' }}
-      REGION_DEV: us-east-1
+      REGION_DEV: us-east-2
       REGION_PROD: us-west-2
+      BUCKET_REGION: us-east-2  # Región específica para los buckets S3 de estado
       TF_ACTION: ${{ github.event.inputs.terraform_action || 'plan' }}
       
     steps:
@@ -61,7 +62,8 @@ jobs:
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
           echo "Ambiente: ${{ env.ENV }}"
-          echo "Región: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          echo "Región de despliegue: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          echo "Región de buckets S3: ${{ env.BUCKET_REGION }}"
           echo "Acción Terraform: ${{ env.TF_ACTION }}"
       
       - name: Instalar Terraform
@@ -72,15 +74,12 @@ jobs:
       # PASO 1: Configurar buckets para Terraform state
       - name: Crear y configurar buckets para Terraform state
         run: |
-          # Definir la región correcta según el ambiente
-          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
-          
           echo "=== Creando buckets para Terraform state ==="
           
-          # Crear buckets (ignorar errores si ya existen)
-          aws s3 mb s3://finaktiva-terraform-state-dev --region ${{ env.REGION_DEV }} || true
-          aws s3 mb s3://finaktiva-terraform-state-stg --region ${{ env.REGION_DEV }} || true
-          aws s3 mb s3://finaktiva-terraform-state-prod --region ${{ env.REGION_PROD }} || true
+          # Crear buckets en la región correcta
+          aws s3 mb s3://finaktiva-terraform-state-dev --region ${{ env.BUCKET_REGION }} || true
+          aws s3 mb s3://finaktiva-terraform-state-stg --region ${{ env.BUCKET_REGION }} || true
+          aws s3 mb s3://finaktiva-terraform-state-prod --region ${{ env.BUCKET_REGION }} || true
           
           # Habilitar versionado
           aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-dev --versioning-configuration Status=Enabled
@@ -93,7 +92,7 @@ jobs:
               --attribute-definitions AttributeName=LockID,AttributeType=S \
               --key-schema AttributeName=LockID,KeyType=HASH \
               --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
-              --region $REGION || true
+              --region ${{ env.BUCKET_REGION }} || true
               
           echo "=== Configuración de Terraform state completada ==="
       
@@ -251,7 +250,7 @@ jobs:
           echo 'variable "region" {' >> $TERRAFORM_DIR/variables.tf
           echo '  description = "Región de AWS"' >> $TERRAFORM_DIR/variables.tf
           echo '  type        = string' >> $TERRAFORM_DIR/variables.tf
-          echo '  default     = "us-east-1"' >> $TERRAFORM_DIR/variables.tf
+          echo '  default     = "us-east-2"' >> $TERRAFORM_DIR/variables.tf
           echo '}' >> $TERRAFORM_DIR/variables.tf
           
           # Verificar archivos de ambiente
@@ -269,12 +268,12 @@ jobs:
       - name: Inicializar Terraform
         run: |
           cd docs/terraform-iac/terraform
-          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
           
+          # Usamos la región específica para el bucket de estado
           terraform init \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
-            -backend-config="region=$REGION" \
+            -backend-config="region=${{ env.BUCKET_REGION }}" \
             -backend-config="dynamodb_table=terraform-state-lock"
       
       - name: Plan de Terraform
@@ -329,7 +328,8 @@ jobs:
           echo "Pipeline completado exitosamente"
           echo "============================================================"
           echo "Ambiente: ${{ env.ENV }}"
-          echo "Región: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          echo "Región para recursos: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          echo "Región para estado en S3: ${{ env.BUCKET_REGION }}"
           echo "Acción ejecutada: ${{ env.TF_ACTION }}"
           if [ "${{ github.event.inputs.skip_image_build }}" = "true" ]; then
             echo "Se omitió la construcción de imágenes"
