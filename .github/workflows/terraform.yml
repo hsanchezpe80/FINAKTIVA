@@ -3,15 +3,8 @@ name: "Terraform CI/CD Pipeline"
 on:
   pull_request:
     branches: [ main, develop ]
-    paths:
-      - 'terraform/**'
   push:
     branches: [ main ]
-    paths:
-      - 'terraform/**'
-  # Permite ejecutar el workflow manualmente desde la interfaz de GitHub
-  ###
-
   workflow_dispatch:
     inputs:
       environment:
@@ -32,43 +25,74 @@ on:
           - apply
           - destroy
 
-env:
-  TF_LOG: INFO
-  AWS_REGION: "us-east-1"  # Cambia según tu región
-
 jobs:
   terraform:
     name: "Terraform"
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./terraform
-
+    
+    # Especifica los permisos necesarios para GitHub Actions
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    # IMPORTANTE: Verifica la estructura de tu repositorio y ajusta esto según sea necesario
+    # Si tu código de Terraform está en la raíz del repositorio, quita esta línea
+    # defaults:
+    #   run:
+    #     working-directory: ./terraform
+    
     steps:
+      # Este paso es útil para ver la estructura del repositorio y depurar problemas de directorio
+      - name: Check Repository Structure
+        run: |
+          echo "Listing repository root:"
+          ls -la
+          echo "Current working directory:"
+          pwd
+
       - name: Checkout repository
         uses: actions/checkout@v3
+
+      # Verifica nuevamente después del checkout para confirmar la estructura
+      - name: Check Repository Structure After Checkout
+        run: |
+          echo "Listing repository root after checkout:"
+          ls -la
+          echo "Current working directory:"
+          pwd
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.5.0
+          terraform_wrapper: false
 
+      # Configura las credenciales de AWS
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: us-east-2  # Cambia a tu región
+
+      # Verifica que las credenciales AWS estén funcionando
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Terraform Init
+        id: init
+        run: |
+          terraform init \
+            -backend-config="bucket=finaktiva-terraform-state-dev" \
+            -backend-config="key=terraform.tfstate" \
+            -backend-config="region=us-east-2" \
+            -backend-config="dynamodb_table=terraform-state-lock"
 
       - name: Terraform Format
         id: fmt
         run: terraform fmt -check
         continue-on-error: true
 
-      - name: Terraform Init
-        id: init
-        run: terraform init
-        
       - name: Terraform Validate
         id: validate
         run: terraform validate
@@ -116,3 +140,4 @@ jobs:
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
         run: terraform destroy -auto-approve
+        

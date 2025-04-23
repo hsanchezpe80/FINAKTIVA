@@ -30,7 +30,7 @@ Estructura del Proyecto
 .
 ├── README.md
 ├── docs/
-│   └── architecture.png
+│   
 ├── terraform/
 │   ├── environments/
 │   │   ├── dev/
@@ -163,20 +163,16 @@ en la carpeta raiz ejecutar
 
 sh script.sh
 
-NOTA: SISE TIENE PROBLEMAS CON LA CREACION DEL BUCKET POR EL NOMBRE COLOCARLE A CADA BUCKET UN NUMERO PARA QUE LO PERMITA AL FINAL EJE 01,02
+NOTA: SI SE TIENE PROBLEMAS CON LA CREACION DEL BUCKET POR EL NOMBRE COLOCARLE A CADA BUCKET UN NUMERO PARA QUE LO PERMITA AL FINAL EJE 01,02
 
-luego
+luegocd ter 
 construircontainer.sh
 
 luego ingresar ala carpeta terraform-iac
 
 -----ejecutar el init
 
-terraform init \                                          
-  -backend-config="bucket=finaktiva-terraform-state-dev" \
-  -backend-config="key=ecs-fargate/terraform.tfstate" \
-  -backend-config="region=us-east-2" \
-  -backend-config="dynamodb_table=terraform-state-lock"
+terraform init -backend-config="bucket=finaktiva-terraform-state-dev" -backend-config="key=terraform.tfstate" -backend-config="region=us-east-2" -backend-config="dynamodb_table=terraform-state-lock"
 
 -------para ejecutar el plan
 
