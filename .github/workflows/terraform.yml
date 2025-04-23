@@ -307,24 +307,38 @@ jobs:
             -out=tfplan \
             -input=false | tee plan_output.txt
           
-          # Mostrar el contenido completo del plan
-          echo "============================================================"
-          echo "RESUMEN DE RECURSOS A MODIFICAR:"
-          echo "============================================================"
-          
-          # Usamos terraform show para mostrar detalles completos del plan
-          terraform show -no-color tfplan
-          
-          # Extraer y mostrar un resumen de recursos
-          RESOURCES_TO_ADD=$(terraform show -no-color tfplan | grep -c "will be created")
-          RESOURCES_TO_CHANGE=$(terraform show -no-color tfplan | grep -c "will be updated")
-          RESOURCES_TO_DESTROY=$(terraform show -no-color tfplan | grep -c "will be destroyed")
-          
-          echo ""
-          echo "Resumen:"
-          echo "- Recursos a crear: $RESOURCES_TO_ADD"
-          echo "- Recursos a modificar: $RESOURCES_TO_CHANGE" 
-          echo "- Recursos a eliminar: $RESOURCES_TO_DESTROY"
+          # Verificar si hay cambios o no en la infraestructura
+          if grep -q "No changes" plan_output.txt; then
+            CHANGES_DETECTED=false
+            echo "============================================================"
+            echo "RESUMEN DE RECURSOS A MODIFICAR:"
+            echo "============================================================"
+            echo "No se detectaron cambios en la infraestructura."
+            echo ""
+            echo "Resumen:"
+            echo "- Recursos a crear: 0"
+            echo "- Recursos a modificar: 0" 
+            echo "- Recursos a eliminar: 0"
+          else
+            CHANGES_DETECTED=true
+            echo "============================================================"
+            echo "RESUMEN DE RECURSOS A MODIFICAR:"
+            echo "============================================================"
+            
+            # Si hay cambios, utilizamos terraform show para mostrar los detalles completos
+            terraform show -no-color tfplan || true
+            
+            # Extraer y mostrar un resumen de recursos (con manejo de errores)
+            RESOURCES_TO_ADD=$(grep -c "will be created" plan_output.txt || echo 0)
+            RESOURCES_TO_CHANGE=$(grep -c "will be updated" plan_output.txt || echo 0)
+            RESOURCES_TO_DESTROY=$(grep -c "will be destroyed" plan_output.txt || echo 0)
+            
+            echo ""
+            echo "Resumen:"
+            echo "- Recursos a crear: $RESOURCES_TO_ADD"
+            echo "- Recursos a modificar: $RESOURCES_TO_CHANGE" 
+            echo "- Recursos a eliminar: $RESOURCES_TO_DESTROY"
+          fi
           
           # Si es solo plan, mostramos un mensaje explicativo
           if [ "${{ env.TF_ACTION }}" = "plan" ]; then
