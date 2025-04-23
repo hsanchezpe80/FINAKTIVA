@@ -91,7 +91,7 @@ jobs:
       - name: Terraform Plan
         id: plan
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
-        run: terraform plan -var-file=ambientes/dev/terraform.tfvars -out=tfplan
+        run: terraform plan -var-file=terraform-iac/ambientes/dev/terraform.tfvars -out=tfplan
 
       - name: Update Pull Request
         uses: actions/github-script@v6
