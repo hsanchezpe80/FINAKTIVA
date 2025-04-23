@@ -236,8 +236,14 @@ jobs:
           # Verificar archivos de ambiente
           mkdir -p $TERRAFORM_DIR/ambientes/${{ env.ENV }}
           
-          echo 'environment = "${{ env.ENV }}"' > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
-          echo 'region = "${{ env.ENV == "prod" && env.REGION_PROD || env.REGION_DEV }}"' >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+          # Crear el archivo terraform.tfvars
+          if [ "${{ env.ENV }}" = "prod" ]; then
+            echo "environment = \"prod\"" > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+            echo "region = \"${{ env.REGION_PROD }}\"" >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+          else
+            echo "environment = \"${{ env.ENV }}\"" > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+            echo "region = \"${{ env.REGION_DEV }}\"" >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+          fi
       
       - name: Inicializar Terraform
         run: |
