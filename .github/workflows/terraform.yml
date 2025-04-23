@@ -43,12 +43,12 @@ jobs:
           echo "Listing repository root:"
           ls -la
           echo "Checking if ambientes/dev directory exists:"
-          if [ -d "ambientes/dev" ]; then
-            echo "Directory exists"
-            ls -la ambientes/dev
-          else
+          if [ ! -d "ambientes/dev" ]; then
             echo "Directory does not exist, creating it"
             mkdir -p ambientes/dev
+          else
+            echo "Directory exists"
+            ls -la ambientes/dev
           fi
 
       - name: Setup Terraform
@@ -69,17 +69,15 @@ jobs:
       - name: Verify AWS credentials
         run: aws sts get-caller-identity
 
-      # Crea el archivo de variables si no existe
+      # Crea el archivo de variables si no existe - sintaxis corregida
       - name: Ensure terraform.tfvars exists
         run: |
           if [ ! -f "ambientes/dev/terraform.tfvars" ]; then
             echo "Creating default terraform.tfvars file"
-            cat > ambientes/dev/terraform.tfvars << EOF
-            # Variables para el entorno dev
-            aws_region = "us-east-2"
-            environment = "dev"
-            # Añade aquí más variables según sea necesario
-            EOF
+            echo '# Variables para el entorno dev' > ambientes/dev/terraform.tfvars
+            echo 'aws_region = "us-east-2"' >> ambientes/dev/terraform.tfvars
+            echo 'environment = "dev"' >> ambientes/dev/terraform.tfvars
+            echo '# Añade aquí más variables según sea necesario' >> ambientes/dev/terraform.tfvars
           fi
 
       - name: Terraform Init
@@ -104,6 +102,7 @@ jobs:
         id: plan
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
         run: terraform plan -var-file=ambientes/dev/terraform.tfvars -out=tfplan
+        continue-on-error: true
 
       - name: Update Pull Request
         uses: actions/github-script@v6
