@@ -299,20 +299,32 @@ jobs:
         run: |
           cd docs/terraform-iac/terraform
           
-          # Ejecutar el plan y mostrar detalladamente los recursos que se crearán
+          # Ejecutar el plan de Terraform y guardar la salida completa en un archivo
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
             -out=tfplan \
-            -detailed-exitcode \
-            -input=false
+            -input=false | tee plan_output.txt
           
-          # Mostrar un resumen de los recursos que se crearán/modificarán/eliminarán
+          # Mostrar el contenido completo del plan
           echo "============================================================"
           echo "RESUMEN DE RECURSOS A MODIFICAR:"
           echo "============================================================"
-          terraform show -no-color tfplan | grep -E '(^# |^  # |will be created|will be destroyed|will be updated)' || echo "No se detectaron cambios en los recursos"
+          
+          # Usamos terraform show para mostrar detalles completos del plan
+          terraform show -no-color tfplan
+          
+          # Extraer y mostrar un resumen de recursos
+          RESOURCES_TO_ADD=$(terraform show -no-color tfplan | grep -c "will be created")
+          RESOURCES_TO_CHANGE=$(terraform show -no-color tfplan | grep -c "will be updated")
+          RESOURCES_TO_DESTROY=$(terraform show -no-color tfplan | grep -c "will be destroyed")
+          
+          echo ""
+          echo "Resumen:"
+          echo "- Recursos a crear: $RESOURCES_TO_ADD"
+          echo "- Recursos a modificar: $RESOURCES_TO_CHANGE" 
+          echo "- Recursos a eliminar: $RESOURCES_TO_DESTROY"
           
           # Si es solo plan, mostramos un mensaje explicativo
           if [ "${{ env.TF_ACTION }}" = "plan" ]; then
