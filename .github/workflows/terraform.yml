@@ -303,54 +303,33 @@ jobs:
           echo "Limpiando estado de Terraform..."
           rm -rf .terraform* terraform.tfstate* tfplan
           
-          # Verificar si existen recursos reales en AWS
-          echo "============================================================"
-          echo "VERIFICACIÓN DE RECURSOS REALES EN AWS:"
-          echo "============================================================"
-          
-          echo "Verificando recursos ECS..."
-          CLUSTER_EXISTS=$(aws ecs list-clusters | grep -c "${{ env.ENV }}-cluster" || echo "0")
-          
-          echo "Verificando VPC..."
-          VPC_EXISTS=$(aws ec2 describe-vpcs --filters "Name=tag:Name,Values=${{ env.ENV }}-vpc" --query 'Vpcs[].VpcId' --output text | wc -w || echo "0")
-          
-          echo "Verificando ECR..."
-          ECR_EXISTS=$(aws ecr describe-repositories --query "repositories[?contains(repositoryName, '${{ env.ENV }}')].repositoryName" --output text | wc -w || echo "0")
-          
-          if [[ "$CLUSTER_EXISTS" == "0" && "$VPC_EXISTS" == "0" && "$ECR_EXISTS" -le "2" ]]; then
-            echo "NO SE DETECTARON RECURSOS PRINCIPALES CREADOS EN AWS."
-            echo "Parece que la infraestructura no ha sido desplegada todavía."
-            INFRASTRUCTURE_EXISTS=false
-          else
-            echo "SE DETECTARON RECURSOS EXISTENTES EN AWS:"
-            echo "- Clusters ECS: $CLUSTER_EXISTS"
-            echo "- VPC: $VPC_EXISTS"
-            echo "- Repositorios ECR relevantes: $ECR_EXISTS"
-            INFRASTRUCTURE_EXISTS=true
-          fi
-          
-          echo ""
-          echo "============================================================"
-          echo "ANÁLISIS DE ESTADO DE TERRAFORM:"
-          echo "============================================================"
-          
-          # Inicializar Terraform con backend S3
+          # Inicializar Terraform con el bucket de backend (aunque esté vacío)
+          echo "Inicializando Terraform..."
           terraform init \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
             -backend-config="dynamodb_table=terraform-state-lock"
           
-          # Intentar ejecutar terraform state list para ver qué recursos conoce Terraform
-          echo "Recursos registrados en el estado de Terraform:"
-          terraform state list || echo "No se pudo obtener lista de recursos del estado."
+          # Verificar si existe estado de Terraform
+          STATE_EXISTS=$(terraform state list 2>/dev/null | wc -l || echo "0")
           
-          # Ejecutar plan con backend S3
+          if [ "$STATE_EXISTS" = "0" ]; then
+            echo "============================================================"
+            echo "NO SE ENCONTRÓ ESTADO DE TERRAFORM. CREACIÓN DESDE CERO."
+            echo "============================================================"
+            echo "Se procederá a crear toda la infraestructura desde cero."
+          else
+            echo "============================================================"
+            echo "ESTADO DE TERRAFORM ENCONTRADO. VERIFICANDO CAMBIOS."
+            echo "============================================================"
+            echo "Recursos registrados en el estado actual:"
+            terraform state list || echo "No se pudo listar el estado."
+          fi
+          
+          # Ejecutar plan para ver qué recursos se crearán
           echo ""
-          echo "============================================================"
-          echo "PLAN DE TERRAFORM CON ESTADO ACTUAL:"
-          echo "============================================================"
-          echo "Ejecutando terraform plan con estado actual..."
+          echo "Ejecutando terraform plan..."
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
@@ -358,43 +337,27 @@ jobs:
             -out=tfplan \
             -input=false | tee plan_output.txt
           
-          # Verificar si hay cambios en el plan
-          if grep -q "No changes" plan_output.txt; then
-            echo ""
-            echo "============================================================"
-            echo "RESULTADO DEL ANÁLISIS:"
-            echo "============================================================"
-            if [ "$INFRASTRUCTURE_EXISTS" = "true" ]; then
-              echo "CONCLUSIÓN: La infraestructura ya está desplegada y está sincronizada con el estado de Terraform."
-              echo "No hay cambios que aplicar."
-            else
-              echo "ADVERTENCIA: Terraform indica que no hay cambios para aplicar, pero no se detectaron recursos en AWS."
-              echo "Esto puede indicar un problema con el estado de Terraform o con los permisos para detectar recursos."
-              echo ""
-              echo "RECOMENDACIÓN: Ejecuta una de estas acciones:"
-              echo "1. Verifica manualmente en la consola de AWS si existen los recursos."
-              echo "2. Considera ejecutar 'terraform destroy' seguido de 'terraform apply' para asegurar la sincronización."
-              echo "3. Utiliza la opción 'terraform plan -refresh-only' localmente para verificar el estado."
-            fi
+          # Extraer resumen del plan
+          PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
+          
+          echo ""
+          echo "============================================================"
+          echo "RESUMEN DE RECURSOS A MODIFICAR:"
+          echo "============================================================"
+          
+          if [ -z "$PLAN_SUMMARY" ]; then
+            echo "No se pudo obtener resumen del plan."
           else
-            # Extraer el resumen del plan
-            PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
-            echo ""
-            echo "============================================================"
-            echo "RESUMEN DE CAMBIOS A APLICAR:"
-            echo "============================================================"
             echo "$PLAN_SUMMARY"
-            echo ""
             
-            # Mostrar recursos que serán modificados
-            echo "Recursos a crear:"
-            grep "will be created" plan_output.txt || echo "Ninguno"
-            echo ""
-            echo "Recursos a actualizar:"
-            grep "will be updated" plan_output.txt || echo "Ninguno"
-            echo ""
-            echo "Recursos a destruir:"
-            grep "will be destroyed" plan_output.txt || echo "Ninguno"
+            # Contar recursos a crear
+            CREATE_COUNT=$(grep -c "will be created" plan_output.txt || echo "0")
+            
+            if [ "$CREATE_COUNT" -gt "0" ]; then
+              echo ""
+              echo "RECURSOS A CREAR:"
+              grep "will be created" plan_output.txt | sort
+            fi
           fi
           
           # Si es solo plan, mostramos un mensaje explicativo
