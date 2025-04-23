@@ -8,13 +8,14 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Entorno a desplegar (dev/prod)'
+        description: 'Entorno a desplegar (dev/prod/stg)'
         required: true
         default: 'dev'
         type: choice
         options:
           - dev
           - prod
+          - stg
       action:
         description: 'Acción a ejecutar'
         required: true
@@ -34,23 +35,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: List Repository Contents
-        run: |
-          echo "Contenido en la raíz del repositorio:"
-          ls -la
-          echo "-----------------------"
-          echo "Contenido en terraform-iac:"
-          ls -la terraform-iac || echo "No existe el directorio terraform-iac"
-          echo "-----------------------"
-          echo "Contenido en terraform-iac/ambientes:"
-          ls -la terraform-iac/ambientes || echo "No existe el directorio terraform-iac/ambientes"
-          echo "-----------------------"
-          echo "Contenido en terraform-iac/ambientes/dev:"
-          ls -la terraform-iac/ambientes/dev || echo "No existe el directorio terraform-iac/ambientes/dev"
-          echo "-----------------------"
-          echo "Buscando todos los archivos .tfvars en el repositorio:"
-          find . -name "*.tfvars"
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -64,48 +48,47 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-2
 
-      - name: Create temporary tfvars file
+      # Verificar la estructura del repositorio y el archivo de variables
+      - name: Verify project structure
         run: |
-          mkdir -p terraform-iac/ambientes/dev
-          cat > terraform-iac/ambientes/dev/terraform.tfvars << EOF
-          # Variables para el entorno dev
-          aws_region = "us-east-2"
-          environment = "dev"
-          # Añade aquí más variables según sea necesario
-          EOF
-          echo "Contenido del archivo creado:"
-          cat terraform-iac/ambientes/dev/terraform.tfvars
+          echo "Estructura del proyecto:"
+          ls -la terraform-iac
+          echo "Archivo de variables del ambiente:"
+          ls -la terraform-iac/ambientes/${{ github.event.inputs.environment || 'dev' }}/terraform.tfvars || echo "Archivo no encontrado"
 
-      # Ejecutamos comandos desde la raíz pero usando rutas absolutas
+      # Inicializar Terraform
       - name: Terraform Init
         id: init
         run: |
-          cd terraform-iac && terraform init \
+          cd terraform-iac
+          terraform init \
             -backend-config="bucket=finaktiva-terraform-state-dev" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=us-east-2" \
             -backend-config="dynamodb_table=terraform-state-lock"
 
+      # Formatear código Terraform
       - name: Terraform Format
         id: fmt
-        run: cd terraform-iac && terraform fmt -check
+        run: cd terraform-iac && terraform fmt -check -recursive
         continue-on-error: true
 
+      # Validar configuración de Terraform
       - name: Terraform Validate
         id: validate
         run: cd terraform-iac && terraform validate
 
-      # Usamos ruta absoluta con el directorio actual
+      # Plan de Terraform usando el archivo de variables del ambiente correspondiente
       - name: Terraform Plan
         id: plan
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
         run: |
           cd terraform-iac
-          echo "Directorio actual: $(pwd)"
-          echo "Verificando archivo de variables:"
-          ls -la ambientes/dev/terraform.tfvars || echo "Archivo no encontrado"
-          terraform plan -var-file="$(pwd)/ambientes/dev/terraform.tfvars" -out=tfplan
+          ENV="${{ github.event.inputs.environment || 'dev' }}"
+          echo "Utilizando ambiente: $ENV"
+          terraform plan -var-file="ambientes/$ENV/terraform.tfvars" -out=tfplan
 
+      # Actualizar PR con resultados (si es un PR)
       - name: Update Pull Request
         uses: actions/github-script@v6
         if: github.event_name == 'pull_request'
@@ -136,14 +119,17 @@ jobs:
               body: output
             })
 
+      # Aplicar cambios (solo en ejecución manual con acción "apply")
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply' && github.event_name == 'workflow_dispatch'
         run: |
           cd terraform-iac
           terraform apply -auto-approve tfplan
 
+      # Destruir infraestructura (solo en ejecución manual con acción "destroy")
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
         run: |
           cd terraform-iac
-          terraform destroy -var-file="$(pwd)/ambientes/${{ github.event.inputs.environment }}/terraform.tfvars" -auto-approve
+          ENV="${{ github.event.inputs.environment }}"
+          terraform destroy -var-file="ambientes/$ENV/terraform.tfvars" -auto-approve
