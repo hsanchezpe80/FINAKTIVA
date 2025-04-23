@@ -1,18 +1,21 @@
-name: Terraform Pipeline Modular
+name: Terraform Deployment - Full Infrastructure
 
 on:
   push:
-    branches: [ main, master ]
-    paths:
-      - 'terraform-iac/**'
-  pull_request:
-    branches: [ main, master ]
-    paths:
-      - 'terraform-iac/**'
+    branches: [main]
   workflow_dispatch:
     inputs:
+      action:
+        description: 'Terraform action'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
       environment:
-        description: 'Ambiente a desplegar (dev/stg/prod)'
+        description: 'Target environment'
         required: true
         default: 'dev'
         type: choice
@@ -20,111 +23,88 @@ on:
           - dev
           - stg
           - prod
-      module:
-        description: 'Módulo específico a desplegar (opcional)'
-        required: false
-        type: choice
-        options:
-          - ''
-          - alb
-          - ecr
-          - ecs
-          - networking
-          - security
 
 env:
-  TF_LOG: INFO
-  AWS_REGION: us-east-1
+  TF_VERSION: 1.7.4
 
 jobs:
-  terraform:
-    name: 'Terraform'
+  deploy:
+    name: 'Deploy (${{ inputs.environment }})'
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: './terraform-iac'
+    environment: ${{ inputs.environment }}
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: 1.5.0
+    - name: Checkout code
+      uses: actions/checkout@v4
 
     - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
+      uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+        aws-region: ${{ inputs.environment == 'prod' && 'us-west-2' || 'us-east-2' }}
 
-    - name: Terraform Format
-      id: fmt
-      run: terraform fmt -check -recursive
-      continue-on-error: true
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform-version: ${{ env.TF_VERSION }}
+        terraform-workspace: ${{ inputs.environment }}
 
-    - name: Terraform Init for Specific Module and Environment
-      id: init
+    - name: Terraform Init with Retry
       run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
+        # Configurar backend dinámico por ambiente
+        cat > backend.tf <<EOF
+        terraform {
+          backend "s3" {
+            bucket         = "finaktiva-tfstate-${{ inputs.environment }}"
+            key            = "terraform.tfstate"
+            region         = "${{ inputs.environment == 'prod' && 'us-west-2' || 'us-east-2' }}"
+            dynamodb_table = "terraform-state-lock"
+            encrypt        = true
+          }
+        }
+        EOF
         
-        if [ -z "$MODULE" ]; then
-          echo "No se especificó módulo, inicialializando el ambiente completo"
-          cd ambientes/$ENVIRONMENT
-          terraform init
-        else
-          echo "Inicializando módulo $MODULE para ambiente $ENVIRONMENT"
-          cd modulos/$MODULE
-          terraform init -backend-config="../../ambientes/$ENVIRONMENT/backend.tfvars"
-        fi
+        # Inicialización con reintentos para S3 eventual consistency
+        for i in {1..3}; do
+          terraform init -input=false && break || sleep 15
+        done
 
     - name: Terraform Validate
-      id: validate
-      run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
-        
-        if [ -z "$MODULE" ]; then
-          cd ambientes/$ENVIRONMENT
-          terraform validate
-        else
-          cd modulos/$MODULE
-          terraform validate
-        fi
+      run: terraform validate -no-color
 
-    - name: Terraform Plan
-      id: plan
+    - name: Terraform Plan (Detailed)
+      if: ${{ inputs.action == 'plan' || inputs.action == 'apply' }}
       run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
+        terraform plan -input=false -no-color -out=tfplan -detailed-exitcode
         
-        if [ -z "$MODULE" ]; then
-          cd ambientes/$ENVIRONMENT
-          terraform plan -var-file="terraform.tfvars" -out=tfplan
-        else
-          cd modulos/$MODULE
-          terraform plan -var-file="../../ambientes/$ENVIRONMENT/terraform.tfvars" -out=tfplan
-        fi
-      continue-on-error: true
+        # Generar reporte detallado
+        terraform show -no-color tfplan > tfplan.txt
+        echo "=== RESOURCE COUNT ==="
+        grep -E "^(  \+|  ~|  -)" tfplan.txt | awk '{print $2}' | sort | uniq -c | sort -nr
+        
+        echo "=== PLAN SUMMARY ==="
+        grep -E "Plan:" tfplan.txt || echo "No changes detected"
 
-    - name: Terraform Plan Status
-      if: steps.plan.outcome == 'failure'
-      run: exit 1
+    - name: Upload Terraform Plan
+      if: ${{ inputs.action == 'plan' && github.event_name == 'pull_request' }}
+      uses: actions/upload-artifact@v3
+      with:
+        name: tfplan-${{ inputs.environment }}
+        path: tfplan.txt
 
     - name: Terraform Apply
-      id: apply
-      if: github.event_name != 'pull_request'
+      if: ${{ inputs.action == 'apply' && github.ref == 'refs/heads/main' }}
       run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
+        # Aplicar con timeout extendido para muchos recursos
+        timeout 1800 terraform apply -input=false -no-color -auto-approve tfplan
         
-        if [ -z "$MODULE" ]; then
-          cd ambientes/$ENVIRONMENT
-          terraform apply -auto-approve tfplan
-        else
-          cd modulos/$MODULE
-          terraform apply -auto-approve tfplan
-        fi
+        # Mostrar outputs importantes
+        echo "=== IMPORTANT OUTPUTS ==="
+        terraform output -no-color | grep -E "(vpc_id|subnets|alb_dns|cluster_name)"
+
+    - name: Terraform Destroy
+      if: ${{ inputs.action == 'destroy' && github.ref == 'refs/heads/main' }}
+      run: |
+        echo "WARNING: Destroying all resources!"
+        terraform destroy -input=false -no-color -auto-approve
