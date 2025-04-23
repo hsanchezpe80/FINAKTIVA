@@ -34,17 +34,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Debug Directory Structure
+      - name: List Repository Contents
         run: |
-          echo "Repository root:"
-          pwd
+          echo "Contenido en la raíz del repositorio:"
           ls -la
           echo "-----------------------"
-          echo "Verificando archivo terraform.tfvars:"
-          ls -la terraform-iac/ambientes/dev/terraform.tfvars || echo "Archivo no encontrado"
+          echo "Contenido en terraform-iac:"
+          ls -la terraform-iac || echo "No existe el directorio terraform-iac"
           echo "-----------------------"
-          echo "Verificando directorios en terraform-iac:"
-          ls -la terraform-iac/ || echo "Directorio no encontrado"
+          echo "Contenido en terraform-iac/ambientes:"
+          ls -la terraform-iac/ambientes || echo "No existe el directorio terraform-iac/ambientes"
+          echo "-----------------------"
+          echo "Contenido en terraform-iac/ambientes/dev:"
+          ls -la terraform-iac/ambientes/dev || echo "No existe el directorio terraform-iac/ambientes/dev"
+          echo "-----------------------"
+          echo "Buscando todos los archivos .tfvars en el repositorio:"
+          find . -name "*.tfvars"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -59,18 +64,23 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-2
 
-      - name: Verify AWS credentials
-        run: aws sts get-caller-identity
+      - name: Create temporary tfvars file
+        run: |
+          mkdir -p terraform-iac/ambientes/dev
+          cat > terraform-iac/ambientes/dev/terraform.tfvars << EOF
+          # Variables para el entorno dev
+          aws_region = "us-east-2"
+          environment = "dev"
+          # Añade aquí más variables según sea necesario
+          EOF
+          echo "Contenido del archivo creado:"
+          cat terraform-iac/ambientes/dev/terraform.tfvars
 
-      # Cambiamos al directorio donde están los archivos de Terraform
-      - name: Change to Terraform directory
-        run: cd terraform-iac
-
+      # Ejecutamos comandos desde la raíz pero usando rutas absolutas
       - name: Terraform Init
         id: init
-        working-directory: terraform-iac
         run: |
-          terraform init \
+          cd terraform-iac && terraform init \
             -backend-config="bucket=finaktiva-terraform-state-dev" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=us-east-2" \
@@ -78,21 +88,23 @@ jobs:
 
       - name: Terraform Format
         id: fmt
-        working-directory: terraform-iac
-        run: terraform fmt -check
+        run: cd terraform-iac && terraform fmt -check
         continue-on-error: true
 
       - name: Terraform Validate
         id: validate
-        working-directory: terraform-iac
-        run: terraform validate
+        run: cd terraform-iac && terraform validate
 
-      # Usamos la ruta directa al archivo tfvars
+      # Usamos ruta absoluta con el directorio actual
       - name: Terraform Plan
         id: plan
-        working-directory: terraform-iac
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
-        run: terraform plan -var-file=ambientes/dev/terraform.tfvars -out=tfplan
+        run: |
+          cd terraform-iac
+          echo "Directorio actual: $(pwd)"
+          echo "Verificando archivo de variables:"
+          ls -la ambientes/dev/terraform.tfvars || echo "Archivo no encontrado"
+          terraform plan -var-file="$(pwd)/ambientes/dev/terraform.tfvars" -out=tfplan
 
       - name: Update Pull Request
         uses: actions/github-script@v6
@@ -126,10 +138,12 @@ jobs:
 
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply' && github.event_name == 'workflow_dispatch'
-        working-directory: terraform-iac
-        run: terraform apply -auto-approve tfplan
+        run: |
+          cd terraform-iac
+          terraform apply -auto-approve tfplan
 
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
-        working-directory: terraform-iac
-        run: terraform destroy -var-file=ambientes/${{ github.event.inputs.environment }}/terraform.tfvars -auto-approve
+        run: |
+          cd terraform-iac
+          terraform destroy -var-file="$(pwd)/ambientes/${{ github.event.inputs.environment }}/terraform.tfvars" -auto-approve
