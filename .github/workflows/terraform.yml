@@ -35,6 +35,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Super Detailed Repository Debug
+        run: |
+          echo "==== ESTRUCTURA COMPLETA DEL REPOSITORIO ===="
+          find . -type f | grep -v ".git" | sort
+          
+          echo -e "\n==== CONTENIDO DE LA CARPETA TERRAFORM-IAC ===="
+          ls -la ./terraform-iac || echo "Directorio terraform-iac no encontrado"
+          
+          echo -e "\n==== CONTENIDO DE LA CARPETA AMBIENTES ===="
+          ls -la ./terraform-iac/ambientes || echo "Directorio ambientes no encontrado"
+          
+          echo -e "\n==== CONTENIDO DE LA CARPETA DEV ===="
+          ls -la ./terraform-iac/ambientes/dev || echo "Directorio dev no encontrado"
+          
+          echo -e "\n==== BUSCAR TODOS LOS ARCHIVOS TERRAFORM.TFVARS ===="
+          find . -name "terraform.tfvars"
+          
+          echo -e "\n==== INFORMACIÓN DEL SISTEMA DE ARCHIVOS ===="
+          df -h
+          
+          echo -e "\n==== PERMISOS DE USUARIO ===="
+          whoami
+          id
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -48,13 +72,45 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-2
 
-      # Verificar la estructura del repositorio y el archivo de variables
-      - name: Verify project structure
+      # Crear un archivo tfvars de respaldo en caso de que el original no exista
+      - name: Create Backup tfvars File
         run: |
-          echo "Estructura del proyecto:"
-          ls -la terraform-iac
-          echo "Archivo de variables del ambiente:"
-          ls -la terraform-iac/ambientes/${{ github.event.inputs.environment || 'dev' }}/terraform.tfvars || echo "Archivo no encontrado"
+          mkdir -p terraform-iac/ambientes/dev
+          echo "==== CREANDO ARCHIVO TERRAFORM.TFVARS DE RESPALDO ===="
+          cat > terraform-iac/ambientes/dev/terraform.tfvars.backup << EOF
+          # Variables para el entorno dev
+          aws_region = "us-east-2"
+          environment = "dev"
+          
+          # Variables de red
+          vpc_cidr = "10.0.0.0/16"
+          public_subnets_cidr = ["10.0.1.0/24", "10.0.2.0/24"]
+          private_subnets_cidr = ["10.0.3.0/24", "10.0.4.0/24"]
+          isolated_subnets_cidr = ["10.0.5.0/24", "10.0.6.0/24"]
+          availability_zones = ["us-east-2a", "us-east-2b"]
+          
+          # Variables del proyecto
+          project_name = "finaktiva"
+          EOF
+          
+          echo "Contenido del archivo de respaldo creado:"
+          cat terraform-iac/ambientes/dev/terraform.tfvars.backup
+          
+          echo -e "\n==== VERIFICANDO ARCHIVOS EN CARPETA DEV DESPUÉS DE CREAR BACKUP ===="
+          ls -la terraform-iac/ambientes/dev/
+
+      - name: Try Using Original or Backup File
+        id: varfile
+        run: |
+          cd terraform-iac
+          if [ -f "ambientes/dev/terraform.tfvars" ]; then
+            echo "VAR_FILE=ambientes/dev/terraform.tfvars" >> $GITHUB_OUTPUT
+            echo "Usando archivo original: ambientes/dev/terraform.tfvars"
+          else
+            echo "Archivo original no encontrado, usando backup"
+            cp ambientes/dev/terraform.tfvars.backup ambientes/dev/terraform.tfvars
+            echo "VAR_FILE=ambientes/dev/terraform.tfvars" >> $GITHUB_OUTPUT
+          fi
 
       # Inicializar Terraform
       - name: Terraform Init
@@ -78,7 +134,7 @@ jobs:
         id: validate
         run: cd terraform-iac && terraform validate
 
-      # Plan de Terraform usando el archivo de variables del ambiente correspondiente
+      # Plan de Terraform usando el archivo identificado
       - name: Terraform Plan
         id: plan
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
@@ -86,9 +142,13 @@ jobs:
           cd terraform-iac
           ENV="${{ github.event.inputs.environment || 'dev' }}"
           echo "Utilizando ambiente: $ENV"
-          terraform plan -var-file="ambientes/$ENV/terraform.tfvars" -out=tfplan
+          echo "Verificando existencia del archivo de variables:"
+          ls -la ambientes/$ENV/terraform.tfvars || echo "Archivo no encontrado"
+          
+          echo "Ejecutando terraform plan con archivo: ${{ steps.varfile.outputs.VAR_FILE }}"
+          terraform plan -var-file="${{ steps.varfile.outputs.VAR_FILE }}" -out=tfplan || terraform plan -var-file="ambientes/$ENV/terraform.tfvars.backup" -out=tfplan
 
-      # Actualizar PR con resultados (si es un PR)
+      # El resto del workflow permanece igual...
       - name: Update Pull Request
         uses: actions/github-script@v6
         if: github.event_name == 'pull_request'
@@ -119,17 +179,15 @@ jobs:
               body: output
             })
 
-      # Aplicar cambios (solo en ejecución manual con acción "apply")
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply' && github.event_name == 'workflow_dispatch'
         run: |
           cd terraform-iac
           terraform apply -auto-approve tfplan
 
-      # Destruir infraestructura (solo en ejecución manual con acción "destroy")
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
         run: |
           cd terraform-iac
           ENV="${{ github.event.inputs.environment }}"
-          terraform destroy -var-file="ambientes/$ENV/terraform.tfvars" -auto-approve
+          terraform destroy -var-file="${{ steps.varfile.outputs.VAR_FILE }}" -auto-approve || terraform destroy -var-file="ambientes/$ENV/terraform.tfvars.backup" -auto-approve
