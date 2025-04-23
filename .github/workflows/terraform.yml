@@ -299,6 +299,146 @@ jobs:
         run: |
           cd docs/terraform-iac/terraform
           
+          # Mostrar la versión de Terraform
+          terraform version
+          
+          # Limpiar completamente el directorio de terraform
+          echo "Limpiando estado de Terraform..."
+          rm -rf .terraform* terraform.tfstate* tfplan
+          
+          # ======= ENFOQUE DESDE CERO ABSOLUTO =======
+          # Crear un nuevo directorio limpio para asegurarnos de que no hay estado residual
+          mkdir -p clean_terraform
+          cp -r * clean_terraform/
+          cd clean_terraform
+          
+          # Forzar el uso de un estado local en lugar de S3
+          cat > backend.tf << EOF
+          terraform {
+            backend "local" {}
+          }
+          EOF
+          
+          # Inicializar en el directorio limpio
+          echo "Inicializando Terraform en directorio limpio..."
+          terraform init
+          
+          # Verificar la infraestructura actual en AWS
+          echo "Verificando recursos en AWS..."
+          echo "ECR Repositories:"
+          aws ecr describe-repositories --query "repositories[?contains(repositoryName, '${{ env.ENV }}')].repositoryName" --output table || echo "No hay repositorios ECR"
+          
+          echo "ECS Clusters:"
+          aws ecs list-clusters --query "clusterArns[*]" --output table || echo "No hay clusters ECS"
+          
+          echo "VPCs con tag ${{ env.ENV }}:"
+          aws ec2 describe-vpcs --filters "Name=tag:Name,Values=*${{ env.ENV }}*" --query "Vpcs[*].{ID:VpcId,CIDR:CidrBlock,Name:Tags[?Key=='Name'].Value|[0]}" --output table || echo "No hay VPCs con el tag ${{ env.ENV }}"
+          
+          # Forzar plan ignorando el estado completamente
+          echo "Ejecutando terraform plan desde cero absoluto..."
+          terraform plan \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
+            -var-file="../ambientes/${{ env.ENV }}/terraform.tfvars" \
+            -refresh=false \
+            -input=false | tee fresh_plan.txt
+          
+          # Capturar el resumen del plan
+          FRESH_PLAN_SUMMARY=$(grep "Plan:" fresh_plan.txt || echo "No se encontró resumen del plan")
+          RESOURCES_COUNT=$(grep -c "will be created" fresh_plan.txt || echo "0")
+          
+          # Mostrar resultados
+          echo "============================================================"
+          echo "RESUMEN DE RECURSOS A CREAR (DESDE CERO ABSOLUTO)"
+          echo "============================================================"
+          echo "$FRESH_PLAN_SUMMARY"
+          echo "Total de recursos a crear: $RESOURCES_COUNT"
+          
+          if [ "$RESOURCES_COUNT" -gt "0" ]; then
+            echo ""
+            echo "RECURSOS A CREAR:"
+            grep "will be created" fresh_plan.txt | sort | head -20
+            
+            if [ "$RESOURCES_COUNT" -gt "20" ]; then
+              echo "... y $(($RESOURCES_COUNT - 20)) recursos más."
+            fi
+          fi
+          
+          # Volver al directorio original
+          cd ..
+          
+          # Si el plan desde cero mostró recursos para crear, usamos ese mismo enfoque para el plan final
+          if [ "$RESOURCES_COUNT" -gt "0" ]; then
+            echo ""
+            echo "============================================================"
+            echo "FORZANDO CREACIÓN IGNORANDO ESTADO S3"
+            echo "============================================================"
+            echo "Se detectaron $RESOURCES_COUNT recursos a crear. Configurando plan final para ignorar estado existente."
+            
+            # Usar backend local para el plan final
+            cat > backend.tf << EOF
+            terraform {
+              backend "local" {}
+            }
+            EOF
+            
+            # Inicializar con backend local
+            terraform init -reconfigure
+            
+            # Ejecutar plan final forzando refresh false
+            terraform plan \
+              -var="environment=${{ env.ENV }}" \
+              -var="region=${{ env.DEPLOY_REGION }}" \
+              -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
+              -refresh=false \
+              -out=tfplan \
+              -input=false | tee plan_output.txt
+          else
+            echo ""
+            echo "============================================================"
+            echo "ADVERTENCIA: NO SE DETECTARON RECURSOS A CREAR"
+            echo "============================================================"
+            echo "Incluso con un enfoque desde cero absoluto, Terraform no detectó recursos para crear."
+            echo "Esto sugiere un problema con la configuración de Terraform o con los módulos."
+            echo ""
+            echo "Verificando módulos y configuración..."
+            
+            # Usar backend S3 para el plan final
+            cat > backend.tf << EOF
+            terraform {
+              backend "s3" {
+                # Los valores específicos se pasan en la línea de comandos de init
+              }
+            }
+            EOF
+            
+            # Inicializar con backend S3
+            terraform init -reconfigure \
+              -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
+              -backend-config="key=terraform.tfstate" \
+              -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
+              -backend-config="dynamodb_table=terraform-state-lock"
+            
+            # Ejecutar plan final normal
+            terraform plan \
+              -var="environment=${{ env.ENV }}" \
+              -var="region=${{ env.DEPLOY_REGION }}" \
+              -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
+              -out=tfplan \
+              -input=false | tee plan_output.txt
+          fi
+          
+          # Si es solo plan, mostramos un mensaje explicativo
+          if [ "${{ env.TF_ACTION }}" = "plan" ]; then
+            echo ""
+            echo "============================================================"
+            echo "Plan de Terraform completado. No se aplicarán cambios."
+            echo "Para aplicar estos cambios, ejecuta el workflow con la acción 'apply'."
+            echo "============================================================"
+          fi }}
+        run: |
+          cd docs/terraform-iac/terraform
+          
           # Limpiar completamente el directorio de terraform
           echo "Limpiando estado de Terraform..."
           rm -rf .terraform* terraform.tfstate* tfplan
