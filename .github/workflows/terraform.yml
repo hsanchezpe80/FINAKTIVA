@@ -61,11 +61,6 @@ jobs:
           
           echo "=== Creando buckets para Terraform state ==="
           
-          # Limpiar estados existentes si es necesario (ignorar errores)
-          aws s3 rm s3://finaktiva-terraform-state-dev/terraform.tfstate --region ${{ env.REGION_DEV }} || true
-          aws s3 rm s3://finaktiva-terraform-state-stg/terraform.tfstate --region ${{ env.REGION_DEV }} || true
-          aws s3 rm s3://finaktiva-terraform-state-prod/terraform.tfstate --region ${{ env.REGION_PROD }} || true
-          
           # Crear buckets (ignorar errores si ya existen)
           aws s3 mb s3://finaktiva-terraform-state-dev --region ${{ env.REGION_DEV }} || true
           aws s3 mb s3://finaktiva-terraform-state-stg --region ${{ env.REGION_DEV }} || true
@@ -102,7 +97,81 @@ jobs:
           
           echo "=== Repositorios ECR creados correctamente ==="
       
-      # PASO 3: Autenticar, construir y publicar imágenes Docker a ECR
+      # PASO 3: Configurar módulo ECR
+      - name: Configurar módulo ECR
+        run: |
+          ECR_MODULE_DIR="docs/terraform-iac/terraform/modulos/ecr"
+          mkdir -p $ECR_MODULE_DIR
+          
+          # Data source para obtener los repositorios ECR existentes
+          echo '# Data source para obtener los repositorios ECR existentes' > $ECR_MODULE_DIR/main.tf
+          echo 'data "aws_ecr_repository" "app_repo" {' >> $ECR_MODULE_DIR/main.tf
+          echo '  count = length(var.app_names)' >> $ECR_MODULE_DIR/main.tf
+          echo '  name  = "${var.environment}-${var.app_names[count.index]}"' >> $ECR_MODULE_DIR/main.tf
+          echo '}' >> $ECR_MODULE_DIR/main.tf
+          
+          # Crear o actualizar variables.tf
+          if [ ! -f "$ECR_MODULE_DIR/variables.tf" ]; then
+            echo "Creando variables.tf del módulo ECR..."
+            echo 'variable "app_names" {' > $ECR_MODULE_DIR/variables.tf
+            echo '  description = "Nombres de las aplicaciones"' >> $ECR_MODULE_DIR/variables.tf
+            echo '  type        = list(string)' >> $ECR_MODULE_DIR/variables.tf
+            echo '  default     = ["app1", "app2"]' >> $ECR_MODULE_DIR/variables.tf
+            echo '}' >> $ECR_MODULE_DIR/variables.tf
+            echo '' >> $ECR_MODULE_DIR/variables.tf
+            echo 'variable "environment" {' >> $ECR_MODULE_DIR/variables.tf
+            echo '  description = "Ambiente (dev, stg, prod)"' >> $ECR_MODULE_DIR/variables.tf
+            echo '  type        = string' >> $ECR_MODULE_DIR/variables.tf
+            echo '  default     = "dev"' >> $ECR_MODULE_DIR/variables.tf
+            echo '}' >> $ECR_MODULE_DIR/variables.tf
+          fi
+          
+          # Crear o actualizar outputs.tf
+          if [ ! -f "$ECR_MODULE_DIR/outputs.tf" ]; then
+            echo "Creando outputs.tf del módulo ECR..."
+            echo 'output "repository_urls" {' > $ECR_MODULE_DIR/outputs.tf
+            echo '  description = "URLs de los repositorios ECR"' >> $ECR_MODULE_DIR/outputs.tf
+            echo '  value       = data.aws_ecr_repository.app_repo[*].repository_url' >> $ECR_MODULE_DIR/outputs.tf
+            echo '}' >> $ECR_MODULE_DIR/outputs.tf
+          fi
+      
+      # PASO 4: Asegurar que existan Dockerfiles
+      - name: Asegurar que existan Dockerfiles
+        run: |
+          # Verificar y crear Dockerfile para app1 si no existe
+          if [ ! -f apps/app1/Dockerfile ]; then
+            echo "Creando Dockerfile temporal para app1..."
+            mkdir -p apps/app1/src
+            
+            echo 'FROM alpine:latest' > apps/app1/Dockerfile
+            echo 'WORKDIR /app' >> apps/app1/Dockerfile
+            echo 'COPY src/ .' >> apps/app1/Dockerfile
+            echo 'CMD ["echo", "Esta es una imagen temporal para app1"]' >> apps/app1/Dockerfile
+          fi
+          
+          # Verificar y crear Dockerfile para app2 si no existe
+          if [ ! -f apps/app2/Dockerfile ]; then
+            echo "Creando Dockerfile temporal para app2..."
+            mkdir -p apps/app2/src
+            
+            echo 'FROM alpine:latest' > apps/app2/Dockerfile
+            echo 'WORKDIR /app' >> apps/app2/Dockerfile
+            echo 'COPY src/ .' >> apps/app2/Dockerfile
+            echo 'CMD ["echo", "Esta es una imagen temporal para app2"]' >> apps/app2/Dockerfile
+          fi
+          
+          # Verificar que los directorios src contengan al menos un archivo
+          if [ ! "$(ls -A apps/app1/src 2>/dev/null)" ]; then
+            echo "Creando archivo de ejemplo en app1/src..."
+            echo "console.log('Aplicación 1');" > apps/app1/src/index.js
+          fi
+          
+          if [ ! "$(ls -A apps/app2/src 2>/dev/null)" ]; then
+            echo "Creando archivo de ejemplo en app2/src..."
+            echo "console.log('Aplicación 2');" > apps/app2/src/index.js
+          fi
+      
+      # PASO 5: Autenticar, construir y publicar imágenes Docker a ECR
       - name: Configurar Docker Buildx
         uses: docker/setup-buildx-action@v2
       
@@ -126,10 +195,53 @@ jobs:
           push: true
           tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}.amazonaws.com/${{ env.ENV }}-app2:latest
       
-      # PASO 4: Ejecutar Terraform
-      - name: Inicializar Terraform
-        working-directory: ./terraform
+      # PASO 6: Preparar y ejecutar Terraform
+      - name: Preparar archivos de Terraform
         run: |
+          TERRAFORM_DIR="docs/terraform-iac/terraform"
+          mkdir -p $TERRAFORM_DIR
+          
+          # Crear o actualizar backend.tf
+          echo 'terraform {' > $TERRAFORM_DIR/backend.tf
+          echo '  backend "s3" {' >> $TERRAFORM_DIR/backend.tf
+          echo '    # Los valores específicos se pasan en la línea de comandos de init' >> $TERRAFORM_DIR/backend.tf
+          echo '  }' >> $TERRAFORM_DIR/backend.tf
+          echo '}' >> $TERRAFORM_DIR/backend.tf
+          
+          # Asegurar que main.tf referencia al módulo ECR
+          echo 'provider "aws" {' > $TERRAFORM_DIR/main.tf
+          echo '  region = var.region' >> $TERRAFORM_DIR/main.tf
+          echo '}' >> $TERRAFORM_DIR/main.tf
+          echo '' >> $TERRAFORM_DIR/main.tf
+          echo '# Módulo ECR' >> $TERRAFORM_DIR/main.tf
+          echo 'module "ecr" {' >> $TERRAFORM_DIR/main.tf
+          echo '  source      = "./modulos/ecr"' >> $TERRAFORM_DIR/main.tf
+          echo '  environment = var.environment' >> $TERRAFORM_DIR/main.tf
+          echo '  app_names   = ["app1", "app2"]' >> $TERRAFORM_DIR/main.tf
+          echo '}' >> $TERRAFORM_DIR/main.tf
+          
+          # Verificar variables.tf
+          echo 'variable "environment" {' > $TERRAFORM_DIR/variables.tf
+          echo '  description = "Ambiente (dev, stg, prod)"' >> $TERRAFORM_DIR/variables.tf
+          echo '  type        = string' >> $TERRAFORM_DIR/variables.tf
+          echo '  default     = "dev"' >> $TERRAFORM_DIR/variables.tf
+          echo '}' >> $TERRAFORM_DIR/variables.tf
+          echo '' >> $TERRAFORM_DIR/variables.tf
+          echo 'variable "region" {' >> $TERRAFORM_DIR/variables.tf
+          echo '  description = "Región de AWS"' >> $TERRAFORM_DIR/variables.tf
+          echo '  type        = string' >> $TERRAFORM_DIR/variables.tf
+          echo '  default     = "us-east-1"' >> $TERRAFORM_DIR/variables.tf
+          echo '}' >> $TERRAFORM_DIR/variables.tf
+          
+          # Verificar archivos de ambiente
+          mkdir -p $TERRAFORM_DIR/ambientes/${{ env.ENV }}
+          
+          echo 'environment = "${{ env.ENV }}"' > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+          echo 'region = "${{ env.ENV == "prod" && env.REGION_PROD || env.REGION_DEV }}"' >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
+      
+      - name: Inicializar Terraform
+        run: |
+          cd docs/terraform-iac/terraform
           REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
           
           terraform init \
@@ -139,20 +251,22 @@ jobs:
             -backend-config="dynamodb_table=terraform-state-lock"
       
       - name: Plan de Terraform
-        working-directory: ./terraform
         run: |
+          cd docs/terraform-iac/terraform
           REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
           
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=$REGION" \
+            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
             -out=tfplan
       
       # Solo aplica en push a ramas principales o en dispatch manual, no en PRs
       - name: Aplicar Terraform
         if: github.event_name != 'pull_request'
-        working-directory: ./terraform
-        run: terraform apply -auto-approve tfplan
+        run: |
+          cd docs/terraform-iac/terraform
+          terraform apply -auto-approve tfplan
       
       - name: Notificar completado
         run: echo "Pipeline completado exitosamente para ambiente ${{ env.ENV }}"
