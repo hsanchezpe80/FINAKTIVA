@@ -30,36 +30,26 @@ jobs:
     name: "Terraform"
     runs-on: ubuntu-latest
     
-    # Especifica los permisos necesarios para GitHub Actions
     permissions:
       contents: read
       pull-requests: write
     
-    # IMPORTANTE: Verifica la estructura de tu repositorio y ajusta esto según sea necesario
-    # Si tu código de Terraform está en la raíz del repositorio, quita esta línea
-    # defaults:
-    #   run:
-    #     working-directory: ./terraform
-    
     steps:
-      # Este paso es útil para ver la estructura del repositorio y depurar problemas de directorio
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
       - name: Check Repository Structure
         run: |
           echo "Listing repository root:"
           ls -la
-          echo "Current working directory:"
-          pwd
-
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      # Verifica nuevamente después del checkout para confirmar la estructura
-      - name: Check Repository Structure After Checkout
-        run: |
-          echo "Listing repository root after checkout:"
-          ls -la
-          echo "Current working directory:"
-          pwd
+          echo "Checking if ambientes/dev directory exists:"
+          if [ -d "ambientes/dev" ]; then
+            echo "Directory exists"
+            ls -la ambientes/dev
+          else
+            echo "Directory does not exist, creating it"
+            mkdir -p ambientes/dev
+          fi
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -78,6 +68,19 @@ jobs:
       # Verifica que las credenciales AWS estén funcionando
       - name: Verify AWS credentials
         run: aws sts get-caller-identity
+
+      # Crea el archivo de variables si no existe
+      - name: Ensure terraform.tfvars exists
+        run: |
+          if [ ! -f "ambientes/dev/terraform.tfvars" ]; then
+            echo "Creating default terraform.tfvars file"
+            cat > ambientes/dev/terraform.tfvars << EOF
+            # Variables para el entorno dev
+            aws_region = "us-east-2"
+            environment = "dev"
+            # Añade aquí más variables según sea necesario
+            EOF
+          fi
 
       - name: Terraform Init
         id: init
@@ -100,8 +103,7 @@ jobs:
       - name: Terraform Plan
         id: plan
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
-        run: terraform plan -out=tfplan
-        continue-on-error: true
+        run: terraform plan -var-file=ambientes/dev/terraform.tfvars -out=tfplan
 
       - name: Update Pull Request
         uses: actions/github-script@v6
@@ -135,9 +137,8 @@ jobs:
 
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply' && github.event_name == 'workflow_dispatch'
-        run: terraform apply -auto-approve tfplan
+        run: terraform apply -var-file=ambientes/${{ github.event.inputs.environment }}/terraform.tfvars -auto-approve tfplan
 
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
-        run: terraform destroy -auto-approve
-        
+        run: terraform destroy -var-file=ambientes/${{ github.event.inputs.environment }}/terraform.tfvars -auto-approve
