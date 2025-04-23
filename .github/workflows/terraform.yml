@@ -303,22 +303,23 @@ jobs:
           echo "Limpiando estado de Terraform..."
           rm -rf .terraform* terraform.tfstate* tfplan
           
-          # Verificar si existe el bucket de estado
+          # Verificar si el bucket existe pero evitar error si ya nos pertenece
           echo "Verificando bucket de estado de Terraform..."
-          BUCKET_EXISTS=$(aws s3 ls s3://finaktiva-terraform-state-${{ env.ENV }} 2>&1 | grep -v 'NoSuchBucket' | wc -l)
-          if [ "$BUCKET_EXISTS" -eq "0" ]; then
+          if aws s3 ls "s3://finaktiva-terraform-state-${{ env.ENV }}" 2>&1 | grep -q 'NoSuchBucket'; then
             echo "El bucket de estado no existe. Creándolo..."
-            aws s3 mb s3://finaktiva-terraform-state-${{ env.ENV }} --region ${{ env.STATE_BUCKET_REGION }}
-            aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-${{ env.ENV }} --versioning-configuration Status=Enabled --region ${{ env.STATE_BUCKET_REGION }}
+            aws s3 mb "s3://finaktiva-terraform-state-${{ env.ENV }}" --region ${{ env.STATE_BUCKET_REGION }} || true
+            aws s3api put-bucket-versioning --bucket "finaktiva-terraform-state-${{ env.ENV }}" --versioning-configuration Status=Enabled --region ${{ env.STATE_BUCKET_REGION }}
+          else
+            echo "El bucket de estado ya existe."
           fi
           
           # Verificar si existe el archivo de estado en S3
           echo "Verificando archivo de estado en S3..."
-          STATE_EXISTS=$(aws s3 ls s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate 2>&1 | grep -v 'NoSuchKey' | wc -l)
-          
-          if [ "$STATE_EXISTS" -gt "0" ]; then
+          if aws s3 ls "s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate" 2>&1 | grep -qv 'NoSuchKey'; then
             echo "ADVERTENCIA: Se encontró un archivo de estado en S3. Eliminándolo para forzar creación desde cero..."
-            aws s3 rm s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate
+            aws s3 rm "s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate"
+          else
+            echo "No se encontró archivo de estado en S3."
           fi
           
           # Forzar inicialización con backend local primero
