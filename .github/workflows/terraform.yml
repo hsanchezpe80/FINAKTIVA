@@ -303,33 +303,77 @@ jobs:
           echo "Limpiando estado de Terraform..."
           rm -rf .terraform* terraform.tfstate* tfplan
           
-          # Inicializar Terraform con el bucket de backend (aunque esté vacío)
-          echo "Inicializando Terraform..."
-          terraform init \
+          # Verificar si existe el bucket de estado
+          echo "Verificando bucket de estado de Terraform..."
+          BUCKET_EXISTS=$(aws s3 ls s3://finaktiva-terraform-state-${{ env.ENV }} 2>&1 | grep -v 'NoSuchBucket' | wc -l)
+          if [ "$BUCKET_EXISTS" -eq "0" ]; then
+            echo "El bucket de estado no existe. Creándolo..."
+            aws s3 mb s3://finaktiva-terraform-state-${{ env.ENV }} --region ${{ env.STATE_BUCKET_REGION }}
+            aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-${{ env.ENV }} --versioning-configuration Status=Enabled --region ${{ env.STATE_BUCKET_REGION }}
+          fi
+          
+          # Verificar si existe el archivo de estado en S3
+          echo "Verificando archivo de estado en S3..."
+          STATE_EXISTS=$(aws s3 ls s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate 2>&1 | grep -v 'NoSuchKey' | wc -l)
+          
+          if [ "$STATE_EXISTS" -gt "0" ]; then
+            echo "ADVERTENCIA: Se encontró un archivo de estado en S3. Eliminándolo para forzar creación desde cero..."
+            aws s3 rm s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate
+          fi
+          
+          # Forzar inicialización con backend local primero
+          echo "Inicializando Terraform con backend local..."
+          cat > backend.tf << EOF
+          terraform {
+            backend "local" {}
+          }
+          EOF
+          
+          terraform init -reconfigure
+          
+          # Ejecutar plan con backend local para ver todos los recursos a crear
+          echo "Ejecutando plan preliminar para ver todos los recursos a crear..."
+          terraform plan \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
+            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
+            -input=false | tee plan_local.txt
+          
+          # Extraer resumen del plan local
+          RESOURCES_TO_CREATE=$(grep -c "will be created" plan_local.txt || echo "0")
+          
+          echo ""
+          echo "============================================================"
+          echo "VISTA PREVIA DE RECURSOS A CREAR: $RESOURCES_TO_CREATE recursos"
+          echo "============================================================"
+          
+          grep "will be created" plan_local.txt | sort | head -20
+          
+          if [ "$RESOURCES_TO_CREATE" -gt "20" ]; then
+            echo "... y $(($RESOURCES_TO_CREATE - 20)) recursos más."
+          fi
+          
+          # Restaurar el backend S3 para la ejecución real
+          echo ""
+          echo "Configurando backend S3 para la aplicación real..."
+          cat > backend.tf << EOF
+          terraform {
+            backend "s3" {
+              # Los valores específicos se pasan en la línea de comandos de init
+            }
+          }
+          EOF
+          
+          # Inicializar con backend S3 vacío
+          terraform init -reconfigure \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
             -backend-config="dynamodb_table=terraform-state-lock"
           
-          # Verificar si existe estado de Terraform
-          STATE_EXISTS=$(terraform state list 2>/dev/null | wc -l || echo "0")
-          
-          if [ "$STATE_EXISTS" = "0" ]; then
-            echo "============================================================"
-            echo "NO SE ENCONTRÓ ESTADO DE TERRAFORM. CREACIÓN DESDE CERO."
-            echo "============================================================"
-            echo "Se procederá a crear toda la infraestructura desde cero."
-          else
-            echo "============================================================"
-            echo "ESTADO DE TERRAFORM ENCONTRADO. VERIFICANDO CAMBIOS."
-            echo "============================================================"
-            echo "Recursos registrados en el estado actual:"
-            terraform state list || echo "No se pudo listar el estado."
-          fi
-          
-          # Ejecutar plan para ver qué recursos se crearán
+          # Ejecutar plan final para generar tfplan
           echo ""
-          echo "Ejecutando terraform plan..."
+          echo "Ejecutando plan final con backend S3..."
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
@@ -337,27 +381,22 @@ jobs:
             -out=tfplan \
             -input=false | tee plan_output.txt
           
-          # Extraer resumen del plan
+          # Extraer resumen del plan final
           PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
           
           echo ""
           echo "============================================================"
-          echo "RESUMEN DE RECURSOS A MODIFICAR:"
+          echo "RESUMEN FINAL DE RECURSOS A MODIFICAR:"
           echo "============================================================"
           
           if [ -z "$PLAN_SUMMARY" ]; then
-            echo "No se pudo obtener resumen del plan."
+            if [ "$RESOURCES_TO_CREATE" -gt "0" ]; then
+              echo "Se crearán aproximadamente $RESOURCES_TO_CREATE recursos según la vista previa."
+            else
+              echo "No se pudo determinar cuántos recursos se crearán."
+            fi
           else
             echo "$PLAN_SUMMARY"
-            
-            # Contar recursos a crear
-            CREATE_COUNT=$(grep -c "will be created" plan_output.txt || echo "0")
-            
-            if [ "$CREATE_COUNT" -gt "0" ]; then
-              echo ""
-              echo "RECURSOS A CREAR:"
-              grep "will be created" plan_output.txt | sort
-            fi
           fi
           
           # Si es solo plan, mostramos un mensaje explicativo
