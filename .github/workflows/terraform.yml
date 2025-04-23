@@ -303,78 +303,112 @@ jobs:
           echo "Limpiando estado de Terraform..."
           rm -rf .terraform* terraform.tfstate* tfplan
           
-          # Inicializar Terraform desde cero sin usar backend remoto para forzar detección completa
-          echo "Inicializando Terraform sin backend remoto para forzar comparación completa..."
+          # Hacer un backup del backend.tf original
+          if [ -f backend.tf ]; then
+            cp backend.tf backend.tf.bak
+          fi
           
-          # Crear archivo de backend local temporal
-          cat > backend_temp.tf << EOF
-          terraform {
-            backend "local" {}
-          }
-          EOF
+          # Usar el backend S3 real para mostrar el estado actual
+          echo "Inicializando Terraform con backend S3..."
+          terraform init \
+            -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
+            -backend-config="key=terraform.tfstate" \
+            -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-lock"
           
-          # Inicializar con backend local
-          terraform init -reconfigure
-          
-          # Ejecutar el plan con -refresh=true para forzar la actualización del estado
-          echo "Ejecutando terraform plan completo (ignorando estado remoto)..."
+          # Ejecutar plan con backend S3 para ver estado actual
+          echo "Ejecutando terraform plan con estado actual..."
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-            -out=tfplan \
-            -input=false | tee plan_output.txt
+            -out=tfplan_s3 \
+            -input=false | tee plan_s3_output.txt
           
-          # Verificar la salida del plan en busca de la línea de resumen
-          PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
+          # Guardar el resumen del plan con estado
+          PLAN_S3_SUMMARY=$(grep "Plan:" plan_s3_output.txt || echo "No se encontró resumen del plan con estado S3")
           
           echo "============================================================"
-          echo "RESUMEN DE RECURSOS A MODIFICAR:"
+          echo "RESUMEN DE RECURSOS A MODIFICAR (SEGÚN ESTADO ACTUAL):"
           echo "============================================================"
           
-          if [ -z "$PLAN_SUMMARY" ] || echo "$PLAN_SUMMARY" | grep -q "No changes"; then
-            echo "No se detectaron cambios en la infraestructura (usando estado local)."
+          if grep -q "No changes" plan_s3_output.txt; then
+            echo "No se detectaron cambios en la infraestructura según el estado en S3."
             echo ""
             echo "Resumen:"
             echo "- Recursos a crear: 0"
             echo "- Recursos a modificar: 0" 
             echo "- Recursos a eliminar: 0"
+            
+            echo ""
+            echo "============================================================"
+            echo "SIMULACIÓN DE INFRAESTRUCTURA COMPLETA (DESDE CERO):"
+            echo "============================================================"
+            echo "Para ver qué recursos existen actualmente en la infraestructura, ejecutaremos una simulación con un estado vacío."
+            echo ""
+            
+            # Limpiar nuevamente para forzar un nuevo plan
+            rm -rf .terraform* terraform.tfstate* tfplan_s3
+            
+            # Modificar temporalmente el backend a local
+            echo 'terraform {' > backend.tf
+            echo '  backend "local" {}' >> backend.tf
+            echo '}' >> backend.tf
+            
+            # Inicializar con backend local
+            echo "Inicializando con estado vacío para mostrar infraestructura completa..."
+            terraform init -force-copy
+            
+            # Ejecutar plan sin estado previo
+            terraform plan \
+              -var="environment=${{ env.ENV }}" \
+              -var="region=${{ env.DEPLOY_REGION }}" \
+              -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
+              -input=false -out=tfplan_empty | tee plan_empty.txt
+            
+            # Extraer información del plan
+            PLAN_EMPTY_SUMMARY=$(grep "Plan:" plan_empty.txt || echo "No se pudo obtener simulación")
+            
+            echo "$PLAN_EMPTY_SUMMARY"
+            echo ""
+            echo "Esta simulación muestra los recursos que existen actualmente en la infraestructura."
+            echo "Estos recursos ya están desplegados según el estado en S3."
           else
-            echo "$PLAN_SUMMARY"
+            echo "$PLAN_S3_SUMMARY"
             echo ""
-            echo "Detalle de los recursos que serían modificados:"
-            echo ""
+            echo "Hay cambios pendientes que se aplicarán en la infraestructura."
             
-            # Mostrar recursos a crear
-            echo "RECURSOS A CREAR:"
-            grep -A1 "will be created" plan_output.txt || echo "Ninguno"
-            
-            # Mostrar recursos a actualizar
-            echo "RECURSOS A ACTUALIZAR:"
-            grep -A1 "will be updated" plan_output.txt || echo "Ninguno"
-            
-            # Mostrar recursos a destruir
-            echo "RECURSOS A DESTRUIR:"
-            grep -A1 "will be destroyed" plan_output.txt || echo "Ninguno"
+            # Extraer detalles de los recursos
+            echo "Detalle de recursos:"
+            grep -A2 "# module\." plan_s3_output.txt || echo "No se encontraron detalles de módulos"
+            grep "will be created" plan_s3_output.txt || echo "No se crearán recursos"
+            grep "will be updated" plan_s3_output.txt || echo "No se actualizarán recursos"
+            grep "will be destroyed" plan_s3_output.txt || echo "No se destruirán recursos"
           fi
           
-          # Restaurar la configuración de backend original para los siguientes pasos
-          echo "Restaurando configuración de backend original..."
-          rm -f backend_temp.tf
+          # Restaurar el backend original para continuar con el workflow
+          if [ -f backend.tf.bak ]; then
+            mv backend.tf.bak backend.tf
+          else
+            # Si no hay backup, recreamos el archivo original
+            echo 'terraform {' > backend.tf
+            echo '  backend "s3" {' >> backend.tf
+            echo '    # Los valores específicos se pasan en la línea de comandos de init' >> backend.tf
+            echo '  }' >> backend.tf
+            echo '}' >> backend.tf
+          fi
           
-          # Reconstruir backend.tf original
-          echo 'terraform {' > backend.tf
-          echo '  backend "s3" {' >> backend.tf
-          echo '    # Los valores específicos se pasan en la línea de comandos de init' >> backend.tf
-          echo '  }' >> backend.tf
-          echo '}' >> backend.tf
-          
-          # Volver a inicializar con backend remoto para los siguientes pasos
+          # Volver a inicializar con backend S3 para continuar el workflow
           terraform init -reconfigure \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
-            -backend-config="dynamodb_table=terraform-state-lock"
+            -backend-config="dynamodb_table=terraform-state-lock" || true
+          
+          # Si hay un tfplan_s3, lo copiamos a tfplan para los siguientes pasos
+          if [ -f tfplan_s3 ]; then
+            cp tfplan_s3 tfplan
+          fi
           
           # Si es solo plan, mostramos un mensaje explicativo
           if [ "${{ env.TF_ACTION }}" = "plan" ]; then
