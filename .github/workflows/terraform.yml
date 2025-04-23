@@ -296,12 +296,19 @@ jobs:
           rm -rf .terraform* terraform.tfstate* tfplan
           
           # ======= ENFOQUE DESDE CERO ABSOLUTO =======
-          # Crear un nuevo directorio limpio para asegurarnos de que no hay estado residual
-          mkdir -p clean_terraform
-          cp -r * clean_terraform/
-          cd clean_terraform
+          # Crear un directorio limpio fuera del directorio actual
+          echo "Creando directorio limpio para enfoque desde cero..."
+          CLEAN_DIR="/tmp/clean_terraform_${{ env.ENV }}"
+          rm -rf $CLEAN_DIR
+          mkdir -p $CLEAN_DIR
           
-          # Forzar el uso de un estado local en lugar de S3
+          # Copiar archivos al directorio limpio
+          cp -r *.tf modulos ambientes $CLEAN_DIR/
+          
+          # Trabajar en el directorio limpio
+          cd $CLEAN_DIR
+          
+          # Forzar el uso de un estado local
           cat > backend.tf << EOF
           terraform {
             backend "local" {}
@@ -328,7 +335,7 @@ jobs:
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
-            -var-file="../ambientes/${{ env.ENV }}/terraform.tfvars" \
+            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
             -refresh=false \
             -input=false | tee fresh_plan.txt
           
@@ -354,7 +361,7 @@ jobs:
           fi
           
           # Volver al directorio original
-          cd ..
+          cd /home/runner/work/*/docs/terraform-iac/terraform
           
           # Si el plan desde cero mostró recursos para crear, usamos ese mismo enfoque para el plan final
           if [ "$RESOURCES_COUNT" -gt "0" ]; then
