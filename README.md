@@ -187,3 +187,14 @@ terraform plan -var-file=ambientes/dev/terraform.tfvars
 probar el balanceador
 
 curl http://dev-alb-399478373.us-east-1.elb.amazonaws.com/
+
+
+Probar el servicio Worker:
+Los workers normalmente no tienen un endpoint HTTP expuesto directamente si están diseñados para procesar trabajos en segundo plano. Sin embargo, puedes verificar su estado de varias maneras:
+
+
+# Verificar el estado del servicio en ECS
+aws ecs describe-services --cluster dev-cluster --services dev-worker-service --query "services[].status"
+
+# Revisar los logs de CloudWatch del servicio worker
+aws logs get-log-events --log-group-name /ecs/dev/worker-service --log-stream-name $(aws logs describe-log-streams --log-group-name /ecs/dev/worker-service --query "logStreams[0].logStreamName" --output text) --limit 10
