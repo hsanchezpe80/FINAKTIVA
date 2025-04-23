@@ -299,18 +299,20 @@ jobs:
         run: |
           cd docs/terraform-iac/terraform
           
-          # Forzar reinicio del plan eliminando cualquier estado local
-          rm -f .terraform/terraform.tfstate .terraform/terraform.tfstate.backup || true
+          # Primero limpiar completamente el directorio de terraform
+          echo "Limpiando estado de Terraform..."
+          rm -rf .terraform* terraform.tfstate* tfplan
           
-          # Regenerar los archivos de configuración de Terraform
+          # Inicializar Terraform desde cero
+          echo "Inicializando Terraform..."
           terraform init -reconfigure \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
             -backend-config="dynamodb_table=terraform-state-lock"
           
-          # Ejecutar el plan de Terraform con output detallado y guardarlo
-          echo "Ejecutando terraform plan con opciones detalladas..."
+          # Ejecutar el plan con -refresh=true para forzar la actualización del estado
+          echo "Ejecutando terraform plan con actualización forzada..."
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
@@ -319,15 +321,11 @@ jobs:
             -input=false \
             -refresh=true | tee plan_output.txt
           
-          # Mostrar información de recursos
-          echo "============================================================"
-          echo "RESUMEN DE RECURSOS A MODIFICAR:"
-          echo "============================================================"
-          
-          # Buscar la línea de resumen del plan
-          PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
-          
-          if [ -z "$PLAN_SUMMARY" ] || echo "$PLAN_SUMMARY" | grep -q "No changes"; then
+          # Verificar si el plan contiene la palabra "No changes"
+          if grep -q "No changes" plan_output.txt; then
+            echo "============================================================"
+            echo "RESUMEN DE RECURSOS A MODIFICAR:"
+            echo "============================================================"
             echo "No se detectaron cambios en la infraestructura."
             echo ""
             echo "Resumen:"
@@ -335,21 +333,32 @@ jobs:
             echo "- Recursos a modificar: 0" 
             echo "- Recursos a eliminar: 0"
           else
-            echo "Se detectaron cambios en la infraestructura."
-            echo ""
-            echo "$PLAN_SUMMARY"
+            # Intenta encontrar la línea de resumen del plan
+            PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "")
+            
+            echo "============================================================"
+            echo "RESUMEN DE RECURSOS A MODIFICAR:"
+            echo "============================================================"
+            
+            if [ -z "$PLAN_SUMMARY" ]; then
+              echo "No se encontró un resumen del plan estándar."
+              echo "Verificando recursos individualmente..."
+              
+              # Contar recursos manualmente
+              ADD_COUNT=$(grep -c "will be created" plan_output.txt || echo 0)
+              CHANGE_COUNT=$(grep -c "will be updated" plan_output.txt || echo 0)
+              DESTROY_COUNT=$(grep -c "will be destroyed" plan_output.txt || echo 0)
+              
+              echo "Plan: $ADD_COUNT to add, $CHANGE_COUNT to change, $DESTROY_COUNT to destroy."
+            else
+              echo "$PLAN_SUMMARY"
+            fi
+            
             echo ""
             echo "Detalle de recursos:"
-            echo ""
             
-            # Mostrar los recursos que serán creados/modificados/eliminados
-            grep -A2 "# module\." plan_output.txt || true
-            grep "will be created" plan_output.txt || true
-            grep "will be updated" plan_output.txt || true
-            grep "will be destroyed" plan_output.txt || true
-            
-            # Intentar mostrar el contenido del plan si está disponible
-            terraform show -no-color tfplan || echo "No se pudo mostrar el detalle del plan"
+            # Usar terraform show para mostrar los recursos
+            terraform show -no-color tfplan || echo "Error al mostrar el plan detallado"
           fi
           
           # Si es solo plan, mostramos un mensaje explicativo
