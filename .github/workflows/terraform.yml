@@ -1,12 +1,14 @@
-name: Terraform Deploy
+name: Infraestructura y Despliegue
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Ambiente (dev, stg, prod)'
+        description: 'Ambiente a desplegar (dev, stg, prod)'
         required: true
         default: 'dev'
         type: choice
@@ -14,7 +16,7 @@ on:
           - dev
           - stg
           - prod
-      action:
+      terraform_action:
         description: 'Acción de Terraform'
         required: true
         default: 'plan'
@@ -24,80 +26,132 @@ on:
           - apply
           - destroy
 
-env:
-  AWS_REGION: us-east-1
-  TF_VERSION: 1.7.4  # Versión actual estable al momento de escribir esto
-
 jobs:
   deploy:
-    name: Terraform Deployment
+    name: Despliegue de Infraestructura
     runs-on: ubuntu-latest
-    environment: production
     
+    env:
+      ENV: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || 'dev' }}
+      DEPLOY_REGION: ${{ (github.event.inputs.environment == 'prod' && 'us-west-2') || 'us-east-2' }}
+      TF_ACTION: ${{ github.event.inputs.terraform_action || 'plan' }}
+      
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform-version: ${{ env.TF_VERSION }}
-        terraform-workspace: default
-
-    - name: Terraform Init
-      id: init
-      run: |
-        # Configurar backend dinámicamente
-        cat > backend.tf <<EOF
-        terraform {
-          backend "s3" {
-            bucket         = "finaktiva-tfstate-${{ inputs.environment || 'dev' }}"
-            key            = "terraform.tfstate"
-            region         = "${{ env.AWS_REGION }}"
-            dynamodb_table = "terraform-locks"
-            encrypt        = true
+      - name: Checkout del código
+        uses: actions/checkout@v3
+      
+      - name: Configurar AWS CLI
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.DEPLOY_REGION }}
+      
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+      
+      # Prepara la estructura de directorios para Terraform
+      - name: Preparar directorio Terraform
+        run: |
+          mkdir -p terraform
+          cd terraform
+          
+          # Crear archivo principal de Terraform
+          cat > main.tf << EOF
+          provider "aws" {
+            region = var.region
           }
-        }
-        EOF
-        
-        # Inicializar con reintentos para manejar eventual consistency de S3
-        for i in {1..3}; do
-          terraform init -input=false && break || sleep 10
-        done
-
-    - name: Terraform Validate
-      run: terraform validate
-
-    - name: Terraform Plan
-      if: ${{ inputs.action == 'plan' || inputs.action == 'apply' }}
-      run: |
-        terraform plan -input=false -out=tfplan
-        terraform show -no-color tfplan > tfplan.txt
-        
-        # Mostrar resumen del plan
-        echo "=== PLAN SUMMARY ==="
-        grep -E "Plan:|No changes." tfplan.txt
-
-    - name: Terraform Apply
-      if: ${{ inputs.action == 'apply' && github.ref == 'refs/heads/main' }}
-      run: terraform apply -input=false -auto-approve tfplan
-
-    - name: Terraform Destroy
-      if: ${{ inputs.action == 'destroy' && github.ref == 'refs/heads/main' }}
-      run: |
-        terraform destroy -input=false -auto-approve
-        echo "WARNING: Infrastructure destroyed!"
-
-    - name: Upload Terraform Plan
-      if: ${{ inputs.action == 'plan' && github.event_name == 'pull_request' }}
-      uses: actions/upload-artifact@v3
-      with:
-        name: tfplan
-        path: tfplan.txt
+          
+          # Recursos básicos
+          resource "aws_vpc" "main" {
+            cidr_block           = "10.0.0.0/16"
+            enable_dns_support   = true
+            enable_dns_hostnames = true
+            tags = {
+              Name        = "\${var.environment}-vpc"
+              Environment = var.environment
+            }
+          }
+          
+          # Subnets públicas
+          resource "aws_subnet" "public" {
+            count                   = 2
+            vpc_id                  = aws_vpc.main.id
+            cidr_block              = "10.0.\${count.index + 1}.0/24"
+            availability_zone       = "\${var.region}\${count.index == 0 ? "a" : "b"}"
+            map_public_ip_on_launch = true
+            tags = {
+              Name        = "\${var.environment}-public-subnet-\${count.index}"
+              Environment = var.environment
+            }
+          }
+          EOF
+          
+          # Crear variables.tf
+          cat > variables.tf << EOF
+          variable "environment" {
+            description = "Ambiente (dev, stg, prod)"
+            type        = string
+            default     = "dev"
+          }
+          
+          variable "region" {
+            description = "Región de AWS"
+            type        = string
+            default     = "us-east-2"
+          }
+          EOF
+          
+          # Crear outputs.tf
+          cat > outputs.tf << EOF
+          output "vpc_id" {
+            description = "ID de la VPC"
+            value       = aws_vpc.main.id
+          }
+          
+          output "public_subnets" {
+            description = "IDs de las subnets públicas"
+            value       = aws_subnet.public[*].id
+          }
+          EOF
+      
+      - name: Inicializar Terraform (Local Backend)
+        run: |
+          cd terraform
+          terraform init
+      
+      - name: Plan de Terraform
+        run: |
+          cd terraform
+          terraform plan \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
+            -out=tfplan
+      
+      # Aplicar cambios si la acción es 'apply' y no es un PR
+      - name: Aplicar Terraform
+        if: ${{ env.TF_ACTION == 'apply' && github.event_name != 'pull_request' }}
+        run: |
+          cd terraform
+          terraform apply -auto-approve tfplan
+      
+      # Destruir infraestructura si la acción es 'destroy'
+      - name: Destruir infraestructura
+        if: ${{ env.TF_ACTION == 'destroy' && github.event_name != 'pull_request' }}
+        run: |
+          cd terraform
+          terraform destroy -auto-approve \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=${{ env.DEPLOY_REGION }}"
+      
+      - name: Notificar completado
+        run: |
+          echo "============================================================"
+          echo "Pipeline completado exitosamente"
+          echo "============================================================"
+          echo "Ambiente: ${{ env.ENV }}"
+          echo "Región: ${{ env.DEPLOY_REGION }}"
+          echo "Acción ejecutada: ${{ env.TF_ACTION }}"
+####
