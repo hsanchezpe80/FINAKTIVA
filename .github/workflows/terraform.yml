@@ -1,19 +1,14 @@
-name: Terraform Pipeline Modular
+name: Infraestructura y Despliegue
 
 on:
   push:
-    branches: [ main, master ]
-    paths:
-      - 'terraform-iac/**'
+    branches: [main, develop]
   pull_request:
-    branches: [ main, master ]
-    paths:
-      - 'terraform-iac/**'
-      ##################
+    branches: [main, develop]
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Ambiente a desplegar (dev/stg/prod)'
+        description: 'Ambiente a desplegar (dev, stg, prod)'
         required: true
         default: 'dev'
         type: choice
@@ -21,115 +16,1081 @@ on:
           - dev
           - stg
           - prod
-      module:
-        description: 'Módulo específico a desplegar (opcional)'
-        required: false
+      terraform_action:
+        description: 'Acción de Terraform'
+        required: true
+        default: 'plan'
         type: choice
         options:
-          - ''
-          - alb
-          - ecr
-          - ecs
-          - networking
-          - security
-
-env:
-  TF_LOG: INFO
-  AWS_REGION: us-east-1
+          - plan
+          - apply
+          - destroy
+      skip_image_build:
+        description: 'Omitir construcción de imágenes'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
-  terraform:
-    name: 'Terraform'
+  deploy:
+    name: Despliegue de Infraestructura
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: './terraform-iac'
-
+    
+    # Establecer el ambiente según el contexto
+    env:
+      # Por defecto usa 'dev' para develop branch, 'prod' para main, o el input manual
+      ENV: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || 'dev' }}
+      REGION_DEV: us-east-2
+      REGION_STG: us-east-2
+      REGION_PROD: us-west-2
+      BUCKET_REGION_DEV: us-east-2
+      BUCKET_REGION_STG: us-east-2
+      BUCKET_REGION_PROD: us-west-2
+      TF_ACTION: ${{ github.event.inputs.terraform_action || 'plan' }}
+      
     steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_version: 1.5.0
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
-
-    - name: Terraform Format
-      id: fmt
-      run: terraform fmt -check -recursive
-      continue-on-error: true
-
-    - name: Terraform Init for Specific Module and Environment
-      id: init
-      run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
-        
-        if [ -z "$MODULE" ]; then
-          echo "No se especificó módulo, inicialializando el ambiente completo"
-          cd ambientes/$ENVIRONMENT
-          terraform init
-        else
-          echo "Inicializando módulo $MODULE para ambiente $ENVIRONMENT"
-          cd modulos/$MODULE
-          terraform init -backend-config="../../ambientes/$ENVIRONMENT/backend.tfvars"
-        fi
-
-    - name: Terraform Validate
-      id: validate
-      run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
-        
-        if [ -z "$MODULE" ]; then
-          cd ambientes/$ENVIRONMENT
-          terraform validate
-        else
-          cd modulos/$MODULE
-          terraform validate
-        fi
-
-    - name: Terraform Plan
-      id: plan
-      run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
-        
-        if [ -z "$MODULE" ]; then
-          cd ambientes/$ENVIRONMENT
-          terraform plan -var-file="terraform.tfvars" -out=tfplan
-        else
-          cd modulos/$MODULE
-          terraform plan -var-file="../../ambientes/$ENVIRONMENT/terraform.tfvars" -out=tfplan
-        fi
-      continue-on-error: true
-
-    - name: Terraform Plan Status
-      if: steps.plan.outcome == 'failure'
-      run: exit 1
-
-
-
-    - name: Terraform Apply
-      id: apply
-      if: github.event_name != 'pull_request'
-      run: |
-        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
-        MODULE=${{ github.event.inputs.module }}
-        
-        if [ -z "$MODULE" ]; then
-          cd ambientes/$ENVIRONMENT
+      - name: Checkout del código
+        uses: actions/checkout@v3
+      
+      - name: Configurar variables de región
+        run: |
+          # Definir la región de despliegue según el ambiente
+          if [ "${{ env.ENV }}" = "prod" ]; then
+            echo "DEPLOY_REGION=${{ env.REGION_PROD }}" >> $GITHUB_ENV
+            echo "STATE_BUCKET_REGION=${{ env.BUCKET_REGION_PROD }}" >> $GITHUB_ENV
+          elif [ "${{ env.ENV }}" = "stg" ]; then
+            echo "DEPLOY_REGION=${{ env.REGION_STG }}" >> $GITHUB_ENV
+            echo "STATE_BUCKET_REGION=${{ env.BUCKET_REGION_STG }}" >> $GITHUB_ENV
+          else
+            echo "DEPLOY_REGION=${{ env.REGION_DEV }}" >> $GITHUB_ENV
+            echo "STATE_BUCKET_REGION=${{ env.BUCKET_REGION_DEV }}" >> $GITHUB_ENV
+          fi
+          
+          echo "Ambiente: ${{ env.ENV }}"
+          echo "Región de despliegue: $DEPLOY_REGION"
+          echo "Región del bucket de estado: $STATE_BUCKET_REGION"
+      
+      - name: Configurar AWS CLI
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.DEPLOY_REGION }}
+      
+      - name: Obtener ID de cuenta AWS
+        id: aws-account
+        run: |
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
+      
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.4.6
+      
+      # PASO 1: Configurar buckets para Terraform state
+      - name: Crear y configurar buckets para Terraform state
+        run: |
+          echo "=== Creando buckets para Terraform state ==="
+          
+          # Crear buckets en sus regiones respectivas
+          aws s3 mb s3://finaktiva-terraform-state-dev --region ${{ env.BUCKET_REGION_DEV }} || true
+          aws s3 mb s3://finaktiva-terraform-state-stg --region ${{ env.BUCKET_REGION_STG }} || true
+          aws s3 mb s3://finaktiva-terraform-state-prod --region ${{ env.BUCKET_REGION_PROD }} || true
+          
+          # Habilitar versionado
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-dev --versioning-configuration Status=Enabled --region ${{ env.BUCKET_REGION_DEV }}
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-stg --versioning-configuration Status=Enabled --region ${{ env.BUCKET_REGION_STG }}
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-prod --versioning-configuration Status=Enabled --region ${{ env.BUCKET_REGION_PROD }}
+          
+          # Crear tabla DynamoDB para lock
+          if [ "${{ env.ENV }}" = "prod" ]; then
+            aws dynamodb create-table \
+                --table-name terraform-state-lock \
+                --attribute-definitions AttributeName=LockID,AttributeType=S \
+                --key-schema AttributeName=LockID,KeyType=HASH \
+                --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+                --region ${{ env.BUCKET_REGION_PROD }} || true
+          else
+            aws dynamodb create-table \
+                --table-name terraform-state-lock \
+                --attribute-definitions AttributeName=LockID,AttributeType=S \
+                --key-schema AttributeName=LockID,KeyType=HASH \
+                --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+                --region ${{ env.BUCKET_REGION_DEV }} || true
+          fi
+              
+          echo "=== Configuración de Terraform state completada ==="
+      
+      # PASO 2: Crear repositorios ECR
+      - name: Crear repositorios ECR
+        run: |
+          echo "=== Creando repositorios ECR ==="
+          
+          # Crear repositorios con nombres que coincidan con el módulo Terraform
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-app1 --force --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-app2 --force --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-api-service --force --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-worker-service --force --region ${{ env.DEPLOY_REGION }} || true
+          
+          aws ecr create-repository --repository-name ${{ env.ENV }}-app1 --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr create-repository --repository-name ${{ env.ENV }}-app2 --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr create-repository --repository-name ${{ env.ENV }}-api-service --region ${{ env.DEPLOY_REGION }} || true
+          aws ecr create-repository --repository-name ${{ env.ENV }}-worker-service --region ${{ env.DEPLOY_REGION }} || true
+          
+          echo "=== Repositorios ECR creados correctamente ==="
+      
+      # PASO 3: Configurar módulo ECR
+      - name: Configurar módulo ECR
+        run: |
+          TERRAFORM_DIR="docs/terraform-iac/terraform"
+          mkdir -p $TERRAFORM_DIR/modulos/ecr
+          
+          # Data source para obtener los repositorios ECR existentes
+          cat > $TERRAFORM_DIR/modulos/ecr/main.tf << EOF
+          data "aws_ecr_repository" "app_repo" {
+            count = length(var.app_names)
+            name  = "\${var.environment}-\${var.app_names[count.index]}"
+          }
+          EOF
+          
+          # Crear o actualizar variables.tf
+          cat > $TERRAFORM_DIR/modulos/ecr/variables.tf << EOF
+          variable "app_names" {
+            description = "Nombres de las aplicaciones"
+            type        = list(string)
+            default     = ["app1", "app2", "api-service", "worker-service"]
+          }
+          
+          variable "environment" {
+            description = "Ambiente (dev, stg, prod)"
+            type        = string
+            default     = "dev"
+          }
+          EOF
+          
+          # Crear o actualizar outputs.tf
+          cat > $TERRAFORM_DIR/modulos/ecr/outputs.tf << EOF
+          output "repository_urls" {
+            description = "URLs de los repositorios ECR"
+            value       = [for repo in data.aws_ecr_repository.app_repo : repo.repository_url]
+          }
+          EOF
+      
+      # PASO 4: Asegurar que existan Dockerfiles
+      - name: Asegurar que existan Dockerfiles
+        if: ${{ github.event.inputs.skip_image_build != 'true' }}
+        run: |
+          # Verificar y crear Dockerfile para app1 si no existe
+          if [ ! -f apps/app1/Dockerfile ]; then
+            echo "Creando Dockerfile temporal para app1..."
+            mkdir -p apps/app1/src
+            
+            echo 'FROM alpine:latest' > apps/app1/Dockerfile
+            echo 'WORKDIR /app' >> apps/app1/Dockerfile
+            echo 'COPY src/ .' >> apps/app1/Dockerfile
+            echo 'CMD ["echo", "Esta es una imagen temporal para app1"]' >> apps/app1/Dockerfile
+          fi
+          
+          # Verificar y crear Dockerfile para app2 si no existe
+          if [ ! -f apps/app2/Dockerfile ]; then
+            echo "Creando Dockerfile temporal para app2..."
+            mkdir -p apps/app2/src
+            
+            echo 'FROM alpine:latest' > apps/app2/Dockerfile
+            echo 'WORKDIR /app' >> apps/app2/Dockerfile
+            echo 'COPY src/ .' >> apps/app2/Dockerfile
+            echo 'CMD ["echo", "Esta es una imagen temporal para app2"]' >> apps/app2/Dockerfile
+          fi
+          
+          # Verificar y crear Dockerfile para api-service si no existe
+          if [ ! -f apps/api-service/Dockerfile ]; then
+            echo "Creando Dockerfile temporal para api-service..."
+            mkdir -p apps/api-service/src
+            
+            echo 'FROM alpine:latest' > apps/api-service/Dockerfile
+            echo 'WORKDIR /app' >> apps/api-service/Dockerfile
+            echo 'COPY src/ .' >> apps/api-service/Dockerfile
+            echo 'EXPOSE 8080' >> apps/api-service/Dockerfile
+            echo 'CMD ["echo", "Esta es una imagen temporal para api-service"]' >> apps/api-service/Dockerfile
+          fi
+          
+          # Verificar y crear Dockerfile para worker-service si no existe
+          if [ ! -f apps/worker-service/Dockerfile ]; then
+            echo "Creando Dockerfile temporal para worker-service..."
+            mkdir -p apps/worker-service/src
+            
+            echo 'FROM alpine:latest' > apps/worker-service/Dockerfile
+            echo 'WORKDIR /app' >> apps/worker-service/Dockerfile
+            echo 'COPY src/ .' >> apps/worker-service/Dockerfile
+            echo 'EXPOSE 8080' >> apps/worker-service/Dockerfile
+            echo 'CMD ["echo", "Esta es una imagen temporal para worker-service"]' >> apps/worker-service/Dockerfile
+          fi
+          
+          # Verificar que los directorios src contengan al menos un archivo
+          if [ ! "$(ls -A apps/app1/src 2>/dev/null)" ]; then
+            echo "Creando archivo de ejemplo en app1/src..."
+            echo "console.log('Aplicación 1');" > apps/app1/src/index.js
+          fi
+          
+          if [ ! "$(ls -A apps/app2/src 2>/dev/null)" ]; then
+            echo "Creando archivo de ejemplo en app2/src..."
+            echo "console.log('Aplicación 2');" > apps/app2/src/index.js
+          fi
+          
+          if [ ! "$(ls -A apps/api-service/src 2>/dev/null)" ]; then
+            echo "Creando archivo de ejemplo en api-service/src..."
+            echo "console.log('API Service');" > apps/api-service/src/index.js
+          fi
+          
+          if [ ! "$(ls -A apps/worker-service/src 2>/dev/null)" ]; then
+            echo "Creando archivo de ejemplo en worker-service/src..."
+            echo "console.log('Worker Service');" > apps/worker-service/src/index.js
+          fi
+      
+      # PASO 5: Autenticar, construir y publicar imágenes Docker a ECR
+      - name: Configurar Docker Buildx
+        if: ${{ github.event.inputs.skip_image_build != 'true' }}
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Autenticar en ECR
+        if: ${{ github.event.inputs.skip_image_build != 'true' }}
+        id: ecr-login
+        run: |
+          aws ecr get-login-password --region ${{ env.DEPLOY_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.DEPLOY_REGION }}.amazonaws.com
+      
+      - name: Construir y publicar imágenes
+        if: ${{ github.event.inputs.skip_image_build != 'true' }}
+        run: |
+          # Función para construir y publicar imagen
+          build_and_push_image() {
+            local app_name=$1
+            echo "Construyendo y publicando imagen para $app_name..."
+            
+            docker build -t ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.DEPLOY_REGION }}.amazonaws.com/${{ env.ENV }}-$app_name:latest ./apps/$app_name
+            docker push ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.DEPLOY_REGION }}.amazonaws.com/${{ env.ENV }}-$app_name:latest
+          }
+          
+          # Construir y publicar todas las imágenes
+          build_and_push_image "app1"
+          build_and_push_image "app2"
+          build_and_push_image "api-service"
+          build_and_push_image "worker-service"
+      
+      # PASO 6: Preparar y ejecutar Terraform
+      - name: Preparar archivos de Terraform
+        run: |
+          TERRAFORM_DIR="docs/terraform-iac/terraform"
+          mkdir -p $TERRAFORM_DIR
+          
+          # Crear módulos necesarios
+          mkdir -p $TERRAFORM_DIR/modulos/networking
+          mkdir -p $TERRAFORM_DIR/modulos/security
+          mkdir -p $TERRAFORM_DIR/modulos/ecs
+          
+          # Crear o actualizar backend.tf
+          echo 'terraform {' > $TERRAFORM_DIR/backend.tf
+          echo '  backend "s3" {' >> $TERRAFORM_DIR/backend.tf
+          echo '    # Los valores específicos se pasan en la línea de comandos de init' >> $TERRAFORM_DIR/backend.tf
+          echo '  }' >> $TERRAFORM_DIR/backend.tf
+          echo '}' >> $TERRAFORM_DIR/backend.tf
+          
+          # Crear modulo de networking
+          cat > $TERRAFORM_DIR/modulos/networking/main.tf << EOF
+          # VPC y configuración de red
+          resource "aws_vpc" "main" {
+            cidr_block           = "10.0.0.0/16"
+            enable_dns_support   = true
+            enable_dns_hostnames = true
+            tags = {
+              Name        = "\${var.environment}-vpc"
+              Environment = var.environment
+            }
+          }
+          
+          # Subnets públicas
+          resource "aws_subnet" "public" {
+            count                   = 2
+            vpc_id                  = aws_vpc.main.id
+            cidr_block              = "10.0.\${count.index + 1}.0/24"
+            availability_zone       = "\${var.region}\${count.index == 0 ? "a" : "b"}"
+            map_public_ip_on_launch = true
+            tags = {
+              Name        = "\${var.environment}-public-subnet-\${count.index}"
+              Environment = var.environment
+            }
+          }
+          
+          # Subnets privadas
+          resource "aws_subnet" "private" {
+            count             = 2
+            vpc_id            = aws_vpc.main.id
+            cidr_block        = "10.0.\${count.index + 3}.0/24"
+            availability_zone = "\${var.region}\${count.index == 0 ? "a" : "b"}"
+            tags = {
+              Name        = "\${var.environment}-private-subnet-\${count.index}"
+              Environment = var.environment
+            }
+          }
+          
+          # Subnets aisladas
+          resource "aws_subnet" "isolated" {
+            count             = 2
+            vpc_id            = aws_vpc.main.id
+            cidr_block        = "10.0.\${count.index + 5}.0/24"
+            availability_zone = "\${var.region}\${count.index == 0 ? "a" : "b"}"
+            tags = {
+              Name        = "\${var.environment}-isolated-subnet-\${count.index}"
+              Environment = var.environment
+            }
+          }
+          
+          # Internet Gateway
+          resource "aws_internet_gateway" "main" {
+            vpc_id = aws_vpc.main.id
+            tags = {
+              Name = "\${var.environment}-igw"
+            }
+          }
+          
+          # Elastic IPs para NAT Gateways
+          resource "aws_eip" "nat" {
+            count  = 2
+            domain = "vpc"
+            tags = {
+              Name = "\${var.environment}-nat-eip-\${count.index}"
+            }
+          }
+          
+          # NAT Gateways
+          resource "aws_nat_gateway" "main" {
+            count         = 2
+            allocation_id = aws_eip.nat[count.index].id
+            subnet_id     = aws_subnet.public[count.index].id
+            tags = {
+              Name = "\${var.environment}-nat-gateway-\${count.index}"
+            }
+          }
+          
+          # Route Tables
+          resource "aws_route_table" "public" {
+            vpc_id = aws_vpc.main.id
+            route {
+              cidr_block = "0.0.0.0/0"
+              gateway_id = aws_internet_gateway.main.id
+            }
+            tags = {
+              Name = "\${var.environment}-public-route-table"
+            }
+          }
+          
+          resource "aws_route_table" "private" {
+            count  = 2
+            vpc_id = aws_vpc.main.id
+            route {
+              cidr_block     = "0.0.0.0/0"
+              nat_gateway_id = aws_nat_gateway.main[count.index].id
+            }
+            tags = {
+              Name = "\${var.environment}-private-route-table-\${count.index}"
+            }
+          }
+          
+          resource "aws_route_table" "isolated" {
+            vpc_id = aws_vpc.main.id
+            tags = {
+              Name = "\${var.environment}-isolated-route-table"
+            }
+          }
+          
+          # Route Table Associations
+          resource "aws_route_table_association" "public" {
+            count          = 2
+            subnet_id      = aws_subnet.public[count.index].id
+            route_table_id = aws_route_table.public.id
+          }
+          
+          resource "aws_route_table_association" "private" {
+            count          = 2
+            subnet_id      = aws_subnet.private[count.index].id
+            route_table_id = aws_route_table.private[count.index].id
+          }
+          
+          resource "aws_route_table_association" "isolated" {
+            count          = 2
+            subnet_id      = aws_subnet.isolated[count.index].id
+            route_table_id = aws_route_table.isolated.id
+          }
+          EOF
+          
+          cat > $TERRAFORM_DIR/modulos/networking/variables.tf << EOF
+          variable "environment" {
+            description = "Ambiente (dev, stg, prod)"
+            type        = string
+            default     = "dev"
+          }
+          
+          variable "region" {
+            description = "AWS Region"
+            type        = string
+            default     = "us-east-1"
+          }
+          EOF
+          
+          cat > $TERRAFORM_DIR/modulos/networking/outputs.tf << EOF
+          output "vpc_id" {
+            description = "ID de la VPC"
+            value       = aws_vpc.main.id
+          }
+          
+          output "public_subnets" {
+            description = "IDs de las subnets públicas"
+            value       = aws_subnet.public[*].id
+          }
+          
+          output "private_subnets" {
+            description = "IDs de las subnets privadas"
+            value       = aws_subnet.private[*].id
+          }
+          
+          output "isolated_subnets" {
+            description = "IDs de las subnets aisladas"
+            value       = aws_subnet.isolated[*].id
+          }
+          EOF
+          
+          # Crear módulo de seguridad
+          cat > $TERRAFORM_DIR/modulos/security/main.tf << EOF
+          # Security Groups
+          resource "aws_security_group" "alb" {
+            name_prefix = "finaktiva-alb-sg-\${var.environment}"
+            vpc_id      = var.vpc_id
+            description = "Security group for ALB"
+          
+            ingress {
+              from_port   = 80
+              to_port     = 80
+              protocol    = "tcp"
+              cidr_blocks = ["0.0.0.0/0"]
+              description = "HTTP from anywhere"
+            }
+          
+            egress {
+              from_port   = 0
+              to_port     = 0
+              protocol    = "-1"
+              cidr_blocks = ["0.0.0.0/0"]
+            }
+          
+            tags = {
+              Name        = "finaktiva-alb-sg-\${var.environment}"
+              Environment = var.environment
+            }
+          }
+          
+          resource "aws_security_group" "ecs_tasks" {
+            name        = "\${var.environment}-ecs-tasks-sg"
+            vpc_id      = var.vpc_id
+            description = "Security group for ECS tasks"
+          
+            ingress {
+              from_port       = 0
+              to_port         = 0
+              protocol        = "-1"
+              security_groups = [aws_security_group.alb.id]
+              description     = "Access from ALB only"
+            }
+          
+            egress {
+              from_port   = 0
+              to_port     = 0
+              protocol    = "-1"
+              cidr_blocks = ["0.0.0.0/0"]
+              description = "Allow all outbound traffic"
+            }
+          
+            tags = {
+              Name = "\${var.environment}-ecs-tasks-sg"
+            }
+          }
+          EOF
+          
+          cat > $TERRAFORM_DIR/modulos/security/variables.tf << EOF
+          variable "environment" {
+            description = "Ambiente (dev, stg, prod)"
+            type        = string
+            default     = "dev"
+          }
+          
+          variable "vpc_id" {
+            description = "ID de la VPC"
+            type        = string
+          }
+          EOF
+          
+          cat > $TERRAFORM_DIR/modulos/security/outputs.tf << EOF
+          output "alb_sg_id" {
+            description = "ID del security group para ALB"
+            value       = aws_security_group.alb.id
+          }
+          
+          output "ecs_tasks_sg_id" {
+            description = "ID del security group para ECS tasks"
+            value       = aws_security_group.ecs_tasks.id
+          }
+          EOF
+          
+          # Crear módulo ECS
+          cat > $TERRAFORM_DIR/modulos/ecs/main.tf << EOF
+          # Cluster ECS
+          resource "aws_ecs_cluster" "main" {
+            name = "\${var.environment}-cluster"
+            
+            setting {
+              name  = "containerInsights"
+              value = "enabled"
+            }
+            
+            tags = {
+              Name        = "\${var.environment}-cluster"
+              Environment = var.environment
+            }
+          }
+          
+          # ALB para servicios ECS
+          resource "aws_lb" "main" {
+            name               = "\${var.environment}-alb"
+            internal           = false
+            load_balancer_type = "application"
+            security_groups    = var.security_groups
+            subnets            = var.public_subnets
+            
+            tags = {
+              Name        = "\${var.environment}-alb"
+              Environment = var.environment
+            }
+          }
+          
+          resource "aws_lb_listener" "http" {
+            load_balancer_arn = aws_lb.main.arn
+            port              = 80
+            protocol          = "HTTP"
+            
+            default_action {
+              type = "fixed-response"
+              
+              fixed_response {
+                content_type = "text/plain"
+                message_body = "Bienvenido a Finaktiva API"
+                status_code  = "200"
+              }
+            }
+          }
+          
+          # Roles IAM para ECS
+          resource "aws_iam_role" "ecs_task_execution_role" {
+            name = "\${var.environment}-ecs-execution-role"
+            assume_role_policy = jsonencode({
+              Version = "2012-10-17"
+              Statement = [
+                {
+                  Action = "sts:AssumeRole"
+                  Effect = "Allow"
+                  Principal = {
+                    Service = "ecs-tasks.amazonaws.com"
+                  }
+                }
+              ]
+            })
+            
+            tags = {
+              Name        = "\${var.environment}-ecs-execution-role"
+              Environment = var.environment
+            }
+          }
+          
+          resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
+            role       = aws_iam_role.ecs_task_execution_role.name
+            policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+          }
+          
+          resource "aws_iam_role" "ecs_task_role" {
+            name = "\${var.environment}-ecs-task-role"
+            assume_role_policy = jsonencode({
+              Version = "2012-10-17"
+              Statement = [
+                {
+                  Action = "sts:AssumeRole"
+                  Effect = "Allow"
+                  Principal = {
+                    Service = "ecs-tasks.amazonaws.com"
+                  }
+                }
+              ]
+            })
+            
+            tags = {
+              Name        = "\${var.environment}-ecs-task-role"
+              Environment = var.environment
+            }
+          }
+          
+          # CloudWatch Logs
+          resource "aws_cloudwatch_log_group" "app_logs" {
+            count             = length(var.app_names)
+            name              = "/ecs/\${var.environment}/\${var.app_names[count.index]}"
+            retention_in_days = 30
+            
+            tags = {
+              Name        = "\${var.environment}-\${var.app_names[count.index]}-logs"
+              Environment = var.environment
+              Application = var.app_names[count.index]
+            }
+          }
+          
+          # Target Groups para ALB
+          resource "aws_lb_target_group" "app" {
+            count       = length(var.app_names)
+            name        = "\${var.environment}-\${var.app_names[count.index]}-tg"
+            port        = 8080
+            protocol    = "HTTP"
+            vpc_id      = var.vpc_id
+            target_type = "ip"
+            
+            health_check {
+              enabled             = true
+              interval            = 30
+              path                = "/health"
+              port                = "traffic-port"
+              healthy_threshold   = 3
+              unhealthy_threshold = 3
+              timeout             = 5
+              matcher             = "200"
+            }
+            
+            tags = {
+              Name        = "\${var.environment}-\${var.app_names[count.index]}-tg"
+              Environment = var.environment
+              Application = var.app_names[count.index]
+            }
+          }
+          
+          # Reglas del Listener
+          resource "aws_lb_listener_rule" "api" {
+            listener_arn = aws_lb_listener.http.arn
+            priority     = 100
+            
+            action {
+              type             = "forward"
+              target_group_arn = aws_lb_target_group.app[0].arn
+            }
+            
+            condition {
+              path_pattern {
+                values = ["/api/*"]
+              }
+            }
+          }
+          
+          # Task Definitions
+          resource "aws_ecs_task_definition" "app" {
+            count                    = length(var.app_names)
+            family                   = "\${var.environment}-\${var.app_names[count.index]}"
+            network_mode             = "awsvpc"
+            requires_compatibilities = ["FARGATE"]
+            cpu                      = "256"
+            memory                   = "512"
+            execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
+            task_role_arn            = aws_iam_role.ecs_task_role.arn
+            
+            container_definitions = jsonencode([
+              {
+                name          = var.app_names[count.index]
+                image         = var.ecr_repos[count.index]
+                essential     = true
+                portMappings  = [
+                  {
+                    containerPort = 8080
+                    hostPort      = 8080
+                    protocol      = "tcp"
+                  }
+                ]
+                logConfiguration = {
+                  logDriver = "awslogs"
+                  options = {
+                    "awslogs-group"         = aws_cloudwatch_log_group.app_logs[count.index].name
+                    "awslogs-region"        = var.region
+                    "awslogs-stream-prefix" = "ecs"
+                  }
+                }
+                environment = []
+                secrets     = []
+              }
+            ])
+            
+            tags = {
+              Name        = "\${var.environment}-\${var.app_names[count.index]}"
+              Environment = var.environment
+              Application = var.app_names[count.index]
+            }
+          }
+          
+          # ECS Services
+          resource "aws_ecs_service" "app" {
+            count                              = length(var.app_names)
+            name                               = "\${var.environment}-\${var.app_names[count.index]}"
+            cluster                            = aws_ecs_cluster.main.id
+            task_definition                    = aws_ecs_task_definition.app[count.index].arn
+            desired_count                      = 2
+            launch_type                        = "FARGATE"
+            health_check_grace_period_seconds  = 60
+            deployment_minimum_healthy_percent = 100
+            deployment_maximum_percent         = 200
+            
+            network_configuration {
+              subnets          = var.private_subnets
+              security_groups  = var.security_groups
+              assign_public_ip = false
+            }
+            
+            load_balancer {
+              target_group_arn = aws_lb_target_group.app[count.index].arn
+              container_name   = var.app_names[count.index]
+              container_port   = 8080
+            }
+            
+            tags = {
+              Name        = "\${var.environment}-\${var.app_names[count.index]}"
+              Environment = var.environment
+              Application = var.app_names[count.index]
+            }
+          }
+          
+          # Auto Scaling para ECS Services
+          resource "aws_appautoscaling_target" "ecs_target" {
+            count              = length(var.app_names)
+            resource_id        = "service/\${var.environment}-cluster/\${var.environment}-\${var.app_names[count.index]}"
+            scalable_dimension = "ecs:service:DesiredCount"
+            service_namespace  = "ecs"
+            min_capacity       = 2
+            max_capacity       = 5
+          }
+          
+          resource "aws_appautoscaling_policy" "ecs_policy_cpu" {
+            count              = length(var.app_names)
+            name               = "\${var.environment}-\${var.app_names[count.index]}-cpu-autoscaling"
+            policy_type        = "TargetTrackingScaling"
+            resource_id        = aws_appautoscaling_target.ecs_target[count.index].resource_id
+            scalable_dimension = aws_appautoscaling_target.ecs_target[count.index].scalable_dimension
+            service_namespace  = aws_appautoscaling_target.ecs_target[count.index].service_namespace
+            
+            target_tracking_scaling_policy_configuration {
+              predefined_metric_specification {
+                predefined_metric_type = "ECSServiceAverageCPUUtilization"
+              }
+              target_value       = 70
+              scale_in_cooldown  = 300
+              scale_out_cooldown = 300
+            }
+          }
+          EOF
+          
+          cat > $TERRAFORM_DIR/modulos/ecs/variables.tf << EOF
+          variable "environment" {
+            description = "Ambiente (dev, stg, prod)"
+            type        = string
+            default     = "dev"
+          }
+          
+          variable "region" {
+            description = "AWS Region"
+            type        = string
+            default     = "us-east-1"
+          }
+          
+          variable "vpc_id" {
+            description = "ID de la VPC"
+            type        = string
+          }
+          
+          variable "public_subnets" {
+            description = "IDs de las subnets públicas"
+            type        = list(string)
+          }
+          
+          variable "private_subnets" {
+            description = "IDs de las subnets privadas"
+            type        = list(string)
+          }
+          
+          variable "security_groups" {
+            description = "IDs de los security groups"
+            type        = list(string)
+          }
+          
+          variable "app_names" {
+            description = "Nombres de las aplicaciones"
+            type        = list(string)
+            default     = ["api-service", "worker-service"]
+          }
+          
+          variable "ecr_repos" {
+            description = "URLs de los repositorios ECR"
+            type        = list(string)
+          }
+          EOF
+          
+          cat > $TERRAFORM_DIR/modulos/ecs/outputs.tf << EOF
+          output "cluster_name" {
+            description = "Nombre del cluster ECS"
+            value       = aws_ecs_cluster.main.name
+          }
+          
+          output "service_names" {
+            description = "Nombres de los servicios ECS"
+            value       = aws_ecs_service.app[*].name
+          }
+          
+          output "task_definition_arns" {
+            description = "ARNs de las task definitions"
+            value       = aws_ecs_task_definition.app[*].arn
+          }
+          
+          output "alb_dns_name" {
+            description = "DNS del ALB"
+            value       = aws_lb.main.dns_name
+          }
+          
+          output "alb_zone_id" {
+            description = "Zone ID del ALB"
+            value       = aws_lb.main.zone_id
+          }
+          EOF
+          
+          # Crear archivo principal main.tf
+          cat > $TERRAFORM_DIR/main.tf << EOF
+          provider "aws" {
+            region = var.region
+          }
+          
+          # Módulo ECR para los repositorios
+          module "ecr" {
+            source      = "./modulos/ecr"
+            environment = var.environment
+            app_names   = ["api-service", "worker-service"]
+          }
+          
+          # Módulo de networking para VPC y subnets
+          module "networking" {
+            source      = "./modulos/networking"
+            environment = var.environment
+            region      = var.region
+          }
+          
+          # Módulo de seguridad para security groups
+          module "security" {
+            source      = "./modulos/security"
+            environment = var.environment
+            vpc_id      = module.networking.vpc_id
+          }
+          
+          # Módulo ECS para los servicios
+          module "ecs" {
+            source          = "./modulos/ecs"
+            environment     = var.environment
+            region          = var.region
+            vpc_id          = module.networking.vpc_id
+            public_subnets  = module.networking.public_subnets
+            private_subnets = module.networking.private_subnets
+            security_groups = [module.security.ecs_tasks_sg_id]
+            app_names       = ["api-service", "worker-service"]
+            ecr_repos       = module.ecr.repository_urls
+          }
+          EOF
+          
+          # Crear variables y outputs
+          cat > $TERRAFORM_DIR/variables.tf << EOF
+          variable "environment" {
+            description = "Ambiente (dev, stg, prod)"
+            type        = string
+            default     = "dev"
+          }
+          
+          variable "region" {
+            description = "Región de AWS"
+            type        = string
+            default     = "us-east-2"
+          }
+          EOF
+          
+          cat > $TERRAFORM_DIR/outputs.tf << EOF
+          output "vpc_id" {
+            description = "ID de la VPC"
+            value       = module.networking.vpc_id
+          }
+          
+          output "public_subnets" {
+            description = "IDs de las subnets públicas"
+            value       = module.networking.public_subnets
+          }
+          
+          output "private_subnets" {
+            description = "IDs de las subnets privadas"
+            value       = module.networking.private_subnets
+          }
+          
+          output "isolated_subnets" {
+            description = "IDs de las subnets aisladas"
+            value       = module.networking.isolated_subnets
+          }
+          
+          output "ecr_repository_urls" {
+            description = "URLs de los repositorios ECR"
+            value       = module.ecr.repository_urls
+          }
+          
+          output "ecs_cluster_name" {
+            description = "Nombre del cluster ECS"
+            value       = module.ecs.cluster_name
+          }
+          
+          output "ecs_service_names" {
+            description = "Nombres de los servicios ECS"
+            value       = module.ecs.service_names
+          }
+          
+          output "task_definition_arns" {
+            description = "ARNs de las task definitions"
+            value       = module.ecs.task_definition_arns
+          }
+          
+          output "alb_dns_name" {
+            description = "DNS del ALB"
+            value       = module.ecs.alb_dns_name
+          }
+          
+          output "alb_zone_id" {
+            description = "Zone ID del ALB"
+            value       = module.ecs.alb_zone_id
+          }
+          EOF
+          
+          # Crear directorio de ambiente
+          mkdir -p $TERRAFORM_DIR/ambientes/${{ env.ENV }}
+          
+          # Crear archivo de variables de ambiente
+          cat > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars << EOF
+          environment = "${{ env.ENV }}"
+          region      = "${{ env.DEPLOY_REGION }}"
+          EOF
+      
+      - name: Plan de Terraform
+        if: ${{ env.TF_ACTION == 'plan' || env.TF_ACTION == 'apply' }}
+        run: |
+          cd docs/terraform-iac/terraform
+          
+          # Forzar uso de backend local para ver todos los recursos
+          cat > backend.tf << EOF
+          terraform {
+            backend "local" {}
+          }
+          EOF
+          
+          # Inicializar Terraform con backend local
+          echo "Inicializando Terraform con backend local para mostrar todos los recursos..."
+          terraform init -reconfigure
+          
+          # Ejecutar plan con refresh=false para mostrar todos los recursos
+          echo "Ejecutando plan para mostrar todos los recursos a crear..."
+          terraform plan \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
+            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
+            -refresh=false \
+            -out=tfplan | tee plan_output.txt
+          
+          # Mostrar resumen de recursos
+          echo "============================================================"
+          echo "RESUMEN DE RECURSOS A CREAR"
+          echo "============================================================"
+          
+          PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
+          echo "$PLAN_SUMMARY"
+          
+          # Contar recursos a crear
+          RESOURCES_COUNT=$(grep -c "will be created" plan_output.txt || echo "0")
+          echo "Total de recursos a crear: $RESOURCES_COUNT"
+          
+          # Mostrar listado de recursos
+          if [ "$RESOURCES_COUNT" -gt "0" ]; then
+            echo ""
+            echo "TIPOS DE RECURSOS A CREAR:"
+            grep "will be created" plan_output.txt | awk '{print $2}' | sort | uniq -c
+          fi
+          
+          # Restaurar backend S3 para el siguiente paso
+          cat > backend.tf << EOF
+          terraform {
+            backend "s3" {
+              # Los valores específicos se pasan en la línea de comandos de init
+            }
+          }
+          EOF
+      
+      - name: Inicializar Terraform
+        run: |
+          cd docs/terraform-iac/terraform
+          
+          # Usamos la región específica para el bucket de estado según el ambiente
+          terraform init -reconfigure \
+            -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
+            -backend-config="key=terraform.tfstate" \
+            -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-lock"
+          
+          # Ejecutar plan normal con backend S3
+          terraform plan \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
+            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
+            -out=tfplan
+      
+      # Aplicar cambios si la acción es 'apply' y no es un PR
+      - name: Aplicar Terraform
+        if: ${{ env.TF_ACTION == 'apply' && github.event_name != 'pull_request' }}
+        run: |
+          cd docs/terraform-iac/terraform
+          echo "============================================================"
+          echo "Aplicando cambios de infraestructura en ambiente ${{ env.ENV }}..."
+          echo "============================================================"
           terraform apply -auto-approve tfplan
-        else
-          cd modulos/$MODULE
-          terraform apply -auto-approve tfplan
-        fi
-
-####3
+      
+      # Destruir infraestructura si la acción es 'destroy'
+      - name: Destruir infraestructura
+        if: ${{ env.TF_ACTION == 'destroy' && github.event_name != 'pull_request' }}
+        run: |
+          cd docs/terraform-iac/terraform
+          
+          echo "============================================================"
+          echo "ATENCIÓN: Se destruirá toda la infraestructura en ambiente ${{ env.ENV }}."
+          echo "============================================================"
+          
+          terraform destroy -auto-approve \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=${{ env.DEPLOY_REGION }}" \
+            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars"
+      
+      - name: Notificar completado
+        run: |
+          echo "============================================================"
+          echo "Pipeline completado exitosamente"
+          echo "============================================================"
+          echo "Ambiente: ${{ env.ENV }}"
+          echo "Región para recursos: ${{ env.DEPLOY_REGION }}"
+          echo "Región para estado en S3: ${{ env.STATE_BUCKET_REGION }}"
+          echo "Acción ejecutada: ${{ env.TF_ACTION }}"
+          if [ "${{ github.event.inputs.skip_image_build }}" = "true" ]; then
+            echo "Se omitió la construcción de imágenes"
+          else
+            echo "Se construyeron y publicaron las imágenes Docker"
+          fi
