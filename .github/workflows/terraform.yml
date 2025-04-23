@@ -1,14 +1,18 @@
-name: Infraestructura y Despliegue
+name: Terraform Pipeline Modular
 
 on:
   push:
-    branches: [main, develop]
+    branches: [ main, master ]
+    paths:
+      - 'terraform-iac/**'
   pull_request:
-    branches: [main, develop]
+    branches: [ main, master ]
+    paths:
+      - 'terraform-iac/**'
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Ambiente a desplegar (dev, stg, prod)'
+        description: 'Ambiente a desplegar (dev/stg/prod)'
         required: true
         default: 'dev'
         type: choice
@@ -16,142 +20,111 @@ on:
           - dev
           - stg
           - prod
-      terraform_action:
-        description: 'Acción de Terraform'
-        required: true
-        default: 'plan'
+      module:
+        description: 'Módulo específico a desplegar (opcional)'
+        required: false
         type: choice
         options:
-          - plan
-          - apply
-          - destroy
+          - ''
+          - alb
+          - ecr
+          - ecs
+          - networking
+          - security
+
+env:
+  TF_LOG: INFO
+  AWS_REGION: us-east-1
 
 jobs:
-  deploy:
-    name: Despliegue de Infraestructura
+  terraform:
+    name: 'Terraform'
     runs-on: ubuntu-latest
-    
-    env:
-      ENV: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || 'dev' }}
-      DEPLOY_REGION: ${{ (github.event.inputs.environment == 'prod' && 'us-west-2') || 'us-east-2' }}
-      TF_ACTION: ${{ github.event.inputs.terraform_action || 'plan' }}
-      
+    defaults:
+      run:
+        working-directory: './terraform-iac'
+
     steps:
-      - name: Checkout del código
-        uses: actions/checkout@v3
-      
-      - name: Configurar AWS CLI
-        uses: aws-actions/configure-aws-credentials@v2
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.DEPLOY_REGION }}
-      
-      - name: Instalar Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.4.6
-      
-      # Prepara la estructura de directorios para Terraform
-      - name: Preparar directorio Terraform
-        run: |
-          mkdir -p terraform
-          cd terraform
-          
-          # Crear archivo principal de Terraform
-          cat > main.tf << EOF
-          provider "aws" {
-            region = var.region
-          }
-          
-          # Recursos básicos
-          resource "aws_vpc" "main" {
-            cidr_block           = "10.0.0.0/16"
-            enable_dns_support   = true
-            enable_dns_hostnames = true
-            tags = {
-              Name        = "\${var.environment}-vpc"
-              Environment = var.environment
-            }
-          }
-          
-          # Subnets públicas
-          resource "aws_subnet" "public" {
-            count                   = 2
-            vpc_id                  = aws_vpc.main.id
-            cidr_block              = "10.0.\${count.index + 1}.0/24"
-            availability_zone       = "\${var.region}\${count.index == 0 ? "a" : "b"}"
-            map_public_ip_on_launch = true
-            tags = {
-              Name        = "\${var.environment}-public-subnet-\${count.index}"
-              Environment = var.environment
-            }
-          }
-          EOF
-          
-          # Crear variables.tf
-          cat > variables.tf << EOF
-          variable "environment" {
-            description = "Ambiente (dev, stg, prod)"
-            type        = string
-            default     = "dev"
-          }
-          
-          variable "region" {
-            description = "Región de AWS"
-            type        = string
-            default     = "us-east-2"
-          }
-          EOF
-          
-          # Crear outputs.tf
-          cat > outputs.tf << EOF
-          output "vpc_id" {
-            description = "ID de la VPC"
-            value       = aws_vpc.main.id
-          }
-          
-          output "public_subnets" {
-            description = "IDs de las subnets públicas"
-            value       = aws_subnet.public[*].id
-          }
-          EOF
-      
-      - name: Inicializar Terraform (Local Backend)
-        run: |
-          cd terraform
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.5.0
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Terraform Format
+      id: fmt
+      run: terraform fmt -check -recursive
+      continue-on-error: true
+
+    - name: Terraform Init for Specific Module and Environment
+      id: init
+      run: |
+        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
+        MODULE=${{ github.event.inputs.module }}
+        
+        if [ -z "$MODULE" ]; then
+          echo "No se especificó módulo, inicialializando el ambiente completo"
+          cd ambientes/$ENVIRONMENT
           terraform init
-      
-      - name: Plan de Terraform
-        run: |
-          cd terraform
-          terraform plan \
-            -var="environment=${{ env.ENV }}" \
-            -var="region=${{ env.DEPLOY_REGION }}" \
-            -out=tfplan
-      
-      # Aplicar cambios si la acción es 'apply' y no es un PR
-      - name: Aplicar Terraform
-        if: ${{ env.TF_ACTION == 'apply' && github.event_name != 'pull_request' }}
-        run: |
-          cd terraform
+        else
+          echo "Inicializando módulo $MODULE para ambiente $ENVIRONMENT"
+          cd modulos/$MODULE
+          terraform init -backend-config="../../ambientes/$ENVIRONMENT/backend.tfvars"
+        fi
+
+    - name: Terraform Validate
+      id: validate
+      run: |
+        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
+        MODULE=${{ github.event.inputs.module }}
+        
+        if [ -z "$MODULE" ]; then
+          cd ambientes/$ENVIRONMENT
+          terraform validate
+        else
+          cd modulos/$MODULE
+          terraform validate
+        fi
+
+    - name: Terraform Plan
+      id: plan
+      run: |
+        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
+        MODULE=${{ github.event.inputs.module }}
+        
+        if [ -z "$MODULE" ]; then
+          cd ambientes/$ENVIRONMENT
+          terraform plan -var-file="terraform.tfvars" -out=tfplan
+        else
+          cd modulos/$MODULE
+          terraform plan -var-file="../../ambientes/$ENVIRONMENT/terraform.tfvars" -out=tfplan
+        fi
+      continue-on-error: true
+
+    - name: Terraform Plan Status
+      if: steps.plan.outcome == 'failure'
+      run: exit 1
+
+    - name: Terraform Apply
+      id: apply
+      if: github.event_name != 'pull_request'
+      run: |
+        ENVIRONMENT=${{ github.event.inputs.environment || 'dev' }}
+        MODULE=${{ github.event.inputs.module }}
+        
+        if [ -z "$MODULE" ]; then
+          cd ambientes/$ENVIRONMENT
           terraform apply -auto-approve tfplan
-      
-      # Destruir infraestructura si la acción es 'destroy'
-      - name: Destruir infraestructura
-        if: ${{ env.TF_ACTION == 'destroy' && github.event_name != 'pull_request' }}
-        run: |
-          cd terraform
-          terraform destroy -auto-approve \
-            -var="environment=${{ env.ENV }}" \
-            -var="region=${{ env.DEPLOY_REGION }}"
-      
-      - name: Notificar completado
-        run: |
-          echo "============================================================"
-          echo "Pipeline completado exitosamente"
-          echo "============================================================"
-          echo "Ambiente: ${{ env.ENV }}"
-          echo "Región: ${{ env.DEPLOY_REGION }}"
-          echo "Acción ejecutada: ${{ env.TF_ACTION }}"
-####
+        else
+          cd modulos/$MODULE
+          terraform apply -auto-approve tfplan
+        fi
