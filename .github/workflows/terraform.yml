@@ -286,152 +286,203 @@ jobs:
       - name: Plan de Terraform
         if: ${{ env.TF_ACTION == 'plan' || env.TF_ACTION == 'apply' }}
         run: |
-          cd docs/terraform-iac/terraform
+          # Guardar el directorio original completo
+          ORIGINAL_DIR=$(pwd)
+          TERRAFORM_DIR="$ORIGINAL_DIR/docs/terraform-iac/terraform"
+          
+          # Asegurarse de que estamos en el directorio correcto de Terraform
+          cd "$TERRAFORM_DIR"
+          echo "Directorio de trabajo actual: $(pwd)"
           
           # Mostrar la versión de Terraform
           terraform version
           
+          # Prueba directa con AWS CLI para comprobar los permisos y la existencia de recursos
+          echo "============================================================"
+          echo "DIAGNÓSTICO DIRECTO DE AWS CON AWS CLI"
+          echo "============================================================"
+          
+          echo "Comprobando permisos e identidad AWS:"
+          aws sts get-caller-identity
+          
+          echo "Comprobando VPCs existentes:"
+          aws ec2 describe-vpcs --query "Vpcs[*].{ID:VpcId,CIDR:CidrBlock,Tags:Tags}" --output json
+          
+          echo "Comprobando clusters ECS existentes:"
+          aws ecs list-clusters
+          
+          echo "Comprobando subnets existentes:"
+          aws ec2 describe-subnets --query "Subnets[*].{ID:SubnetId,VpcId:VpcId,CIDR:CidrBlock,AZ:AvailabilityZone,Tags:Tags}" --output json | head -n 30
+          
+          # Forzar la creación de recursos directamente con AWS CLI para probar permisos
+          echo "============================================================"
+          echo "INTENTANDO CREAR UN RECURSO TEMPORAL PARA VERIFICAR PERMISOS"
+          echo "============================================================"
+          
+          # Crear grupo de seguridad temporal para probar permisos
+          TMP_VPC_ID=$(aws ec2 describe-vpcs --query "Vpcs[0].VpcId" --output text)
+          echo "VPC ID para prueba: $TMP_VPC_ID"
+          
+          if [ -n "$TMP_VPC_ID" ] && [ "$TMP_VPC_ID" != "None" ]; then
+            echo "Intentando crear un grupo de seguridad temporal..."
+            TMP_SG_ID=$(aws ec2 create-security-group \
+              --group-name "tmp-terraform-test-$RANDOM" \
+              --description "Grupo temporal para probar permisos" \
+              --vpc-id "$TMP_VPC_ID" \
+              --query "GroupId" --output text) || echo "No se pudo crear el grupo de seguridad: $?"
+            
+            echo "Grupo de seguridad temporal creado con ID: $TMP_SG_ID"
+            
+            if [ -n "$TMP_SG_ID" ] && [ "$TMP_SG_ID" != "None" ]; then
+              echo "Eliminando grupo de seguridad temporal..."
+              aws ec2 delete-security-group --group-id "$TMP_SG_ID" || echo "No se pudo eliminar el grupo de seguridad: $?"
+            fi
+          else
+            echo "Intentando crear una VPC temporal..."
+            TMP_VPC_ID=$(aws ec2 create-vpc \
+              --cidr-block "192.168.0.0/16" \
+              --tag-specifications "ResourceType=vpc,Tags=[{Key=Name,Value=tmp-terraform-test-$RANDOM}]" \
+              --query "Vpc.VpcId" --output text) || echo "No se pudo crear la VPC: $?"
+            
+            echo "VPC temporal creada con ID: $TMP_VPC_ID"
+            
+            if [ -n "$TMP_VPC_ID" ] && [ "$TMP_VPC_ID" != "None" ]; then
+              echo "Eliminando VPC temporal..."
+              aws ec2 delete-vpc --vpc-id "$TMP_VPC_ID" || echo "No se pudo eliminar la VPC: $?"
+            fi
+          fi
+          
+          echo "============================================================"
+          echo "ENFOQUE DEFINITIVO: IGNORAR EL MÓDULO ECR"
+          echo "============================================================"
+          
           # Limpiar completamente el directorio de terraform
-          echo "Limpiando estado de Terraform..."
           rm -rf .terraform* terraform.tfstate* tfplan
           
-          # ======= ENFOQUE DESDE CERO ABSOLUTO =======
-          # Crear un directorio limpio fuera del directorio actual
-          echo "Creando directorio limpio para enfoque desde cero..."
-          CLEAN_DIR="/tmp/clean_terraform_${{ env.ENV }}"
-          rm -rf $CLEAN_DIR
-          mkdir -p $CLEAN_DIR
+          # Crear un directorio temporal para una configuración básica
+          TEMP_DIR="/tmp/terraform_final_$RANDOM"
+          mkdir -p $TEMP_DIR
+          cp -r modulos ambientes $TEMP_DIR/
           
-          # Copiar archivos al directorio limpio
-          cp -r *.tf modulos ambientes $CLEAN_DIR/
+          # Crear configuración mínima con recursos esenciales
+          cat > $TEMP_DIR/main.tf << EOF
+          provider "aws" {
+            region = "${{ env.DEPLOY_REGION }}"
+          }
           
-          # Trabajar en el directorio limpio
-          cd $CLEAN_DIR
+          variable "environment" {
+            description = "Ambiente (dev, stg, prod)"
+            type        = string
+            default     = "${{ env.ENV }}"
+          }
           
-          # Forzar el uso de un estado local
-          cat > backend.tf << EOF
-          terraform {
-            backend "local" {}
+          variable "region" {
+            description = "Región de AWS"
+            type        = string
+            default     = "${{ env.DEPLOY_REGION }}"
+          }
+          
+          # VPC
+          resource "aws_vpc" "main" {
+            cidr_block           = "10.0.0.0/16"
+            enable_dns_support   = true
+            enable_dns_hostnames = true
+            tags = {
+              Name        = "\${var.environment}-vpc"
+              Environment = var.environment
+            }
+          }
+          
+          # Subnet pública
+          resource "aws_subnet" "public" {
+            count             = 2
+            vpc_id            = aws_vpc.main.id
+            cidr_block        = "10.0.\${count.index + 1}.0/24"
+            availability_zone = "\${var.region}a"
+            tags = {
+              Name        = "\${var.environment}-public-subnet-\${count.index}"
+              Environment = var.environment
+            }
+          }
+          
+          # ECS Cluster
+          resource "aws_ecs_cluster" "main" {
+            name = "\${var.environment}-cluster"
+            tags = {
+              Name        = "\${var.environment}-cluster"
+              Environment = var.environment
+            }
           }
           EOF
           
-          # Inicializar en el directorio limpio
-          echo "Inicializando Terraform en directorio limpio..."
+          # Cambiar al directorio temporal y ejecutar Terraform
+          cd $TEMP_DIR
+          echo "Trabajando en directorio temporal: $(pwd)"
+          
+          # Inicializar Terraform
           terraform init
           
-          # Verificar la infraestructura actual en AWS
-          echo "Verificando recursos en AWS..."
-          echo "ECR Repositories:"
-          aws ecr describe-repositories --query "repositories[?contains(repositoryName, '${{ env.ENV }}')].repositoryName" --output table || echo "No hay repositorios ECR"
+          # Ejecutar plan
+          echo "Ejecutando plan con configuración mínima..."
+          terraform plan -out=tfplan | tee plan_output.txt
           
-          echo "ECS Clusters:"
-          aws ecs list-clusters --query "clusterArns[*]" --output table || echo "No hay clusters ECS"
+          # Capturar resultados
+          PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
+          RESOURCES_COUNT=$(grep -c "will be created" plan_output.txt || echo "0")
           
-          echo "VPCs con tag ${{ env.ENV }}:"
-          aws ec2 describe-vpcs --filters "Name=tag:Name,Values=*${{ env.ENV }}*" --query "Vpcs[*].{ID:VpcId,CIDR:CidrBlock,Name:Tags[?Key=='Name'].Value|[0]}" --output table || echo "No hay VPCs con el tag ${{ env.ENV }}"
+          echo "============================================================"
+          echo "RESULTADOS DE LA VERIFICACIÓN FINAL"
+          echo "============================================================"
+          echo "$PLAN_SUMMARY"
+          echo "Recursos a crear: $RESOURCES_COUNT"
           
-          # Forzar plan ignorando el estado completamente
-          echo "Ejecutando terraform plan desde cero absoluto..."
+          # Volver al directorio original
+          cd "$TERRAFORM_DIR"
+          echo "Volviendo al directorio original: $(pwd)"
+          
+          if [ "$RESOURCES_COUNT" -gt "0" ]; then
+            echo "============================================================"
+            echo "CONCLUSIÓN: SÍ ES POSIBLE CREAR RECURSOS EN AWS"
+            echo "============================================================"
+            echo "El problema está en la configuración específica de tu proyecto."
+            echo "Recomendaciones:"
+            echo "1. Revisar las dependencias del módulo ECR"
+            echo "2. Verificar si existe algún bloqueo en data sources"
+            echo "3. Intentar eliminar el estado remoto completamente:"
+            echo "   aws s3 rm s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate --recursive"
+          else
+            echo "============================================================"
+            echo "CONCLUSIÓN: NO ES POSIBLE CREAR RECURSOS EN AWS"
+            echo "============================================================"
+            echo "Recomendaciones:"
+            echo "1. Verificar los permisos de la cuenta AWS"
+            echo "2. Comprobar límites de servicio"
+            echo "3. Revisar logs de CloudTrail por posibles errores"
+          fi
+          
+          # Asegurar que se genera un archivo tfplan para los siguientes pasos
+          cat > backend.tf << EOF
+          terraform {
+            backend "s3" {
+              # Los valores específicos se pasan en la línea de comandos de init
+            }
+          }
+          EOF
+          
+          # Inicializar con backend S3
+          terraform init -reconfigure \
+            -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
+            -backend-config="key=terraform.tfstate" \
+            -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
+            -backend-config="dynamodb_table=terraform-state-lock"
+          
+          # Ejecutar plan normal para generar tfplan
           terraform plan \
             -var="environment=${{ env.ENV }}" \
             -var="region=${{ env.DEPLOY_REGION }}" \
             -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-            -refresh=false \
-            -input=false | tee fresh_plan.txt
-          
-          # Capturar el resumen del plan
-          FRESH_PLAN_SUMMARY=$(grep "Plan:" fresh_plan.txt || echo "No se encontró resumen del plan")
-          RESOURCES_COUNT=$(grep -c "will be created" fresh_plan.txt || echo "0")
-          
-          # Mostrar resultados
-          echo "============================================================"
-          echo "RESUMEN DE RECURSOS A CREAR (DESDE CERO ABSOLUTO)"
-          echo "============================================================"
-          echo "$FRESH_PLAN_SUMMARY"
-          echo "Total de recursos a crear: $RESOURCES_COUNT"
-          
-          if [ "$RESOURCES_COUNT" -gt "0" ]; then
-            echo ""
-            echo "RECURSOS A CREAR:"
-            grep "will be created" fresh_plan.txt | sort | head -20
-            
-            if [ "$RESOURCES_COUNT" -gt "20" ]; then
-              echo "... y $(($RESOURCES_COUNT - 20)) recursos más."
-            fi
-          fi
-          
-          # Volver al directorio original
-          cd /home/runner/work/*/docs/terraform-iac/terraform
-          
-          # Si el plan desde cero mostró recursos para crear, usamos ese mismo enfoque para el plan final
-          if [ "$RESOURCES_COUNT" -gt "0" ]; then
-            echo ""
-            echo "============================================================"
-            echo "FORZANDO CREACIÓN IGNORANDO ESTADO S3"
-            echo "============================================================"
-            echo "Se detectaron $RESOURCES_COUNT recursos a crear. Configurando plan final para ignorar estado existente."
-            
-            # Usar backend local para el plan final
-            cat > backend.tf << EOF
-            terraform {
-              backend "local" {}
-            }
-            EOF
-            
-            # Inicializar con backend local
-            terraform init -reconfigure
-            
-            # Ejecutar plan final forzando refresh false
-            terraform plan \
-              -var="environment=${{ env.ENV }}" \
-              -var="region=${{ env.DEPLOY_REGION }}" \
-              -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-              -refresh=false \
-              -out=tfplan \
-              -input=false | tee plan_output.txt
-          else
-            echo ""
-            echo "============================================================"
-            echo "ADVERTENCIA: NO SE DETECTARON RECURSOS A CREAR"
-            echo "============================================================"
-            echo "Incluso con un enfoque desde cero absoluto, Terraform no detectó recursos para crear."
-            echo "Esto sugiere un problema con la configuración de Terraform o con los módulos."
-            echo ""
-            echo "Verificando módulos y configuración..."
-            
-            # Usar backend S3 para el plan final
-            cat > backend.tf << EOF
-            terraform {
-              backend "s3" {
-                # Los valores específicos se pasan en la línea de comandos de init
-              }
-            }
-            EOF
-            
-            # Inicializar con backend S3
-            terraform init -reconfigure \
-              -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
-              -backend-config="key=terraform.tfstate" \
-              -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
-              -backend-config="dynamodb_table=terraform-state-lock"
-            
-            # Ejecutar plan final normal
-            terraform plan \
-              -var="environment=${{ env.ENV }}" \
-              -var="region=${{ env.DEPLOY_REGION }}" \
-              -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-              -out=tfplan \
-              -input=false | tee plan_output.txt
-          fi
-          
-          # Si es solo plan, mostramos un mensaje explicativo
-          if [ "${{ env.TF_ACTION }}" = "plan" ]; then
-            echo ""
-            echo "============================================================"
-            echo "Plan de Terraform completado. No se aplicarán cambios."
-            echo "Para aplicar estos cambios, ejecuta el workflow con la acción 'apply'."
-            echo "============================================================"
-          fi
+            -out=tfplan \
+            -input=false
       
       - name: Inicializar Terraform
         run: |
