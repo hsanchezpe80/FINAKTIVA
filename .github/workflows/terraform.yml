@@ -30,27 +30,21 @@ jobs:
     name: "Terraform"
     runs-on: ubuntu-latest
     
-    # Especifica el directorio donde se encuentran los archivos de Terraform
-    defaults:
-      run:
-        working-directory: ./terraform-iac
-    
-    permissions:
-      contents: read
-      pull-requests: write
-    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Check Repository Structure
+      - name: Debug Directory Structure
         run: |
-          echo "Current working directory:"
+          echo "Repository root:"
           pwd
-          echo "Listing current directory:"
           ls -la
-          echo "Listing ambientes/dev directory:"
-          ls -la ambientes/dev || echo "Directory not found"
+          echo "-----------------------"
+          echo "Verificando archivo terraform.tfvars:"
+          ls -la terraform-iac/ambientes/dev/terraform.tfvars || echo "Archivo no encontrado"
+          echo "-----------------------"
+          echo "Verificando directorios en terraform-iac:"
+          ls -la terraform-iac/ || echo "Directorio no encontrado"
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -58,20 +52,23 @@ jobs:
           terraform_version: 1.5.0
           terraform_wrapper: false
 
-      # Configura las credenciales de AWS
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-2  # Cambia a tu región
+          aws-region: us-east-2
 
-      # Verifica que las credenciales AWS estén funcionando
       - name: Verify AWS credentials
         run: aws sts get-caller-identity
 
+      # Cambiamos al directorio donde están los archivos de Terraform
+      - name: Change to Terraform directory
+        run: cd terraform-iac
+
       - name: Terraform Init
         id: init
+        working-directory: terraform-iac
         run: |
           terraform init \
             -backend-config="bucket=finaktiva-terraform-state-dev" \
@@ -81,17 +78,21 @@ jobs:
 
       - name: Terraform Format
         id: fmt
+        working-directory: terraform-iac
         run: terraform fmt -check
         continue-on-error: true
 
       - name: Terraform Validate
         id: validate
+        working-directory: terraform-iac
         run: terraform validate
 
+      # Usamos la ruta directa al archivo tfvars
       - name: Terraform Plan
         id: plan
+        working-directory: terraform-iac
         if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
-        run: terraform plan -var-file=terraform-iac/ambientes/dev/terraform.tfvars -out=tfplan
+        run: terraform plan -var-file=ambientes/dev/terraform.tfvars -out=tfplan
 
       - name: Update Pull Request
         uses: actions/github-script@v6
@@ -125,8 +126,10 @@ jobs:
 
       - name: Terraform Apply
         if: github.event.inputs.action == 'apply' && github.event_name == 'workflow_dispatch'
-        run: terraform apply -var-file=ambientes/${{ github.event.inputs.environment }}/terraform.tfvars -auto-approve tfplan
+        working-directory: terraform-iac
+        run: terraform apply -auto-approve tfplan
 
       - name: Terraform Destroy
         if: github.event.inputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
+        working-directory: terraform-iac
         run: terraform destroy -var-file=ambientes/${{ github.event.inputs.environment }}/terraform.tfvars -auto-approve
