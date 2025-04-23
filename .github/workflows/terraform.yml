@@ -283,17 +283,6 @@ jobs:
           echo "environment = \"${{ env.ENV }}\"" > $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
           echo "region = \"${{ env.DEPLOY_REGION }}\"" >> $TERRAFORM_DIR/ambientes/${{ env.ENV }}/terraform.tfvars
       
-      - name: Inicializar Terraform
-        run: |
-          cd docs/terraform-iac/terraform
-          
-          # Usamos la región específica para el bucket de estado según el ambiente
-          terraform init \
-            -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
-            -backend-config="key=terraform.tfstate" \
-            -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
-            -backend-config="dynamodb_table=terraform-state-lock"
-      
       - name: Plan de Terraform
         if: ${{ env.TF_ACTION == 'plan' || env.TF_ACTION == 'apply' }}
         run: |
@@ -435,119 +424,18 @@ jobs:
             echo "Plan de Terraform completado. No se aplicarán cambios."
             echo "Para aplicar estos cambios, ejecuta el workflow con la acción 'apply'."
             echo "============================================================"
-          fi }}
+          fi
+      
+      - name: Inicializar Terraform
         run: |
           cd docs/terraform-iac/terraform
           
-          # Limpiar completamente el directorio de terraform
-          echo "Limpiando estado de Terraform..."
-          rm -rf .terraform* terraform.tfstate* tfplan
-          
-          # Verificar si el bucket existe pero evitar error si ya nos pertenece
-          echo "Verificando bucket de estado de Terraform..."
-          if aws s3 ls "s3://finaktiva-terraform-state-${{ env.ENV }}" 2>&1 | grep -q 'NoSuchBucket'; then
-            echo "El bucket de estado no existe. Creándolo..."
-            aws s3 mb "s3://finaktiva-terraform-state-${{ env.ENV }}" --region ${{ env.STATE_BUCKET_REGION }} || true
-            aws s3api put-bucket-versioning --bucket "finaktiva-terraform-state-${{ env.ENV }}" --versioning-configuration Status=Enabled --region ${{ env.STATE_BUCKET_REGION }}
-          else
-            echo "El bucket de estado ya existe."
-          fi
-          
-          # Verificar si existe el archivo de estado en S3
-          echo "Verificando archivo de estado en S3..."
-          if aws s3 ls "s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate" 2>&1 | grep -qv 'NoSuchKey'; then
-            echo "ADVERTENCIA: Se encontró un archivo de estado en S3. Eliminándolo para forzar creación desde cero..."
-            aws s3 rm "s3://finaktiva-terraform-state-${{ env.ENV }}/terraform.tfstate"
-          else
-            echo "No se encontró archivo de estado en S3."
-          fi
-          
-          # Forzar inicialización con backend local primero
-          echo "Inicializando Terraform con backend local..."
-          cat > backend.tf << EOF
-          terraform {
-            backend "local" {}
-          }
-          EOF
-          
-          terraform init -reconfigure
-          
-          # Ejecutar plan con backend local para ver todos los recursos a crear
-          echo "Ejecutando plan preliminar para ver todos los recursos a crear..."
-          terraform plan \
-            -var="environment=${{ env.ENV }}" \
-            -var="region=${{ env.DEPLOY_REGION }}" \
-            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-            -input=false | tee plan_local.txt
-          
-          # Extraer resumen del plan local
-          RESOURCES_TO_CREATE=$(grep -c "will be created" plan_local.txt || echo "0")
-          
-          echo ""
-          echo "============================================================"
-          echo "VISTA PREVIA DE RECURSOS A CREAR: $RESOURCES_TO_CREATE recursos"
-          echo "============================================================"
-          
-          grep "will be created" plan_local.txt | sort | head -20
-          
-          if [ "$RESOURCES_TO_CREATE" -gt "20" ]; then
-            echo "... y $(($RESOURCES_TO_CREATE - 20)) recursos más."
-          fi
-          
-          # Restaurar el backend S3 para la ejecución real
-          echo ""
-          echo "Configurando backend S3 para la aplicación real..."
-          cat > backend.tf << EOF
-          terraform {
-            backend "s3" {
-              # Los valores específicos se pasan en la línea de comandos de init
-            }
-          }
-          EOF
-          
-          # Inicializar con backend S3 vacío
-          terraform init -reconfigure \
+          # Usamos la región específica para el bucket de estado según el ambiente
+          terraform init \
             -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
             -backend-config="key=terraform.tfstate" \
             -backend-config="region=${{ env.STATE_BUCKET_REGION }}" \
             -backend-config="dynamodb_table=terraform-state-lock"
-          
-          # Ejecutar plan final para generar tfplan
-          echo ""
-          echo "Ejecutando plan final con backend S3..."
-          terraform plan \
-            -var="environment=${{ env.ENV }}" \
-            -var="region=${{ env.DEPLOY_REGION }}" \
-            -var-file="ambientes/${{ env.ENV }}/terraform.tfvars" \
-            -out=tfplan \
-            -input=false | tee plan_output.txt
-          
-          # Extraer resumen del plan final
-          PLAN_SUMMARY=$(grep "Plan:" plan_output.txt || echo "No se encontró resumen del plan")
-          
-          echo ""
-          echo "============================================================"
-          echo "RESUMEN FINAL DE RECURSOS A MODIFICAR:"
-          echo "============================================================"
-          
-          if [ -z "$PLAN_SUMMARY" ]; then
-            if [ "$RESOURCES_TO_CREATE" -gt "0" ]; then
-              echo "Se crearán aproximadamente $RESOURCES_TO_CREATE recursos según la vista previa."
-            else
-              echo "No se pudo determinar cuántos recursos se crearán."
-            fi
-          else
-            echo "$PLAN_SUMMARY"
-          fi
-          
-          # Si es solo plan, mostramos un mensaje explicativo
-          if [ "${{ env.TF_ACTION }}" = "plan" ]; then
-            echo ""
-            echo "============================================================"
-            echo "Plan de Terraform completado. No se aplicarán cambios."
-            echo "Para aplicar estos cambios, ejecuta el workflow con la acción 'apply'."
-            echo "============================================================"
-          fi
       
       # Aplicar cambios si la acción es 'apply' y no es un PR
       - name: Aplicar Terraform
@@ -588,4 +476,3 @@ jobs:
           else
             echo "Se construyeron y publicaron las imágenes Docker"
           fi
-####
