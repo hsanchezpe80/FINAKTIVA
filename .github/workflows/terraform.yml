@@ -1,193 +1,158 @@
-name: "Terraform CI/CD Pipeline"
+name: Infraestructura y Despliegue
 
 on:
-  pull_request:
-    branches: [ main, develop ]
   push:
-    branches: [ main ]
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Entorno a desplegar (dev/prod/stg)'
+        description: 'Ambiente a desplegar (dev, stg, prod)'
         required: true
         default: 'dev'
         type: choice
         options:
           - dev
-          - prod
           - stg
-      action:
-        description: 'Acción a ejecutar'
-        required: true
-        default: 'plan'
-        type: choice
-        options:
-          - plan
-          - apply
-          - destroy
+          - prod
 
 jobs:
-  terraform:
-    name: "Terraform"
+  deploy:
+    name: Despliegue de Infraestructura
     runs-on: ubuntu-latest
     
+    # Establecer el ambiente según el contexto
+    env:
+      # Por defecto usa 'dev' para develop branch, 'prod' para main, o el input manual
+      ENV: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || 'dev' }}
+      REGION_DEV: us-east-1
+      REGION_PROD: us-west-2
+      
     steps:
-      - name: Checkout repository
+      - name: Checkout del código
         uses: actions/checkout@v3
-
-      - name: Super Detailed Repository Debug
-        run: |
-          echo "==== ESTRUCTURA COMPLETA DEL REPOSITORIO ===="
-          find . -type f | grep -v ".git" | sort
-          
-          echo -e "\n==== CONTENIDO DE LA CARPETA TERRAFORM-IAC ===="
-          ls -la ./terraform-iac || echo "Directorio terraform-iac no encontrado"
-          
-          echo -e "\n==== CONTENIDO DE LA CARPETA AMBIENTES ===="
-          ls -la ./terraform-iac/ambientes || echo "Directorio ambientes no encontrado"
-          
-          echo -e "\n==== CONTENIDO DE LA CARPETA DEV ===="
-          ls -la ./terraform-iac/ambientes/dev || echo "Directorio dev no encontrado"
-          
-          echo -e "\n==== BUSCAR TODOS LOS ARCHIVOS TERRAFORM.TFVARS ===="
-          find . -name "terraform.tfvars"
-          
-          echo -e "\n==== INFORMACIÓN DEL SISTEMA DE ARCHIVOS ===="
-          df -h
-          
-          echo -e "\n==== PERMISOS DE USUARIO ===="
-          whoami
-          id
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: 1.5.0
-          terraform_wrapper: false
-
-      - name: Configure AWS credentials
+      
+      - name: Configurar AWS CLI
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-2
-
-      # Crear un archivo tfvars de respaldo en caso de que el original no exista
-      - name: Create Backup tfvars File
+          aws-region: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}
+      
+      - name: Obtener ID de cuenta AWS
+        id: aws-account
         run: |
-          mkdir -p terraform-iac/ambientes/dev
-          echo "==== CREANDO ARCHIVO TERRAFORM.TFVARS DE RESPALDO ===="
-          cat > terraform-iac/ambientes/dev/terraform.tfvars.backup << EOF
-          # Variables para el entorno dev
-          aws_region = "us-east-2"
-          environment = "dev"
-          
-          # Variables de red
-          vpc_cidr = "10.0.0.0/16"
-          public_subnets_cidr = ["10.0.1.0/24", "10.0.2.0/24"]
-          private_subnets_cidr = ["10.0.3.0/24", "10.0.4.0/24"]
-          isolated_subnets_cidr = ["10.0.5.0/24", "10.0.6.0/24"]
-          availability_zones = ["us-east-2a", "us-east-2b"]
-          
-          # Variables del proyecto
-          project_name = "finaktiva"
-          EOF
-          
-          echo "Contenido del archivo de respaldo creado:"
-          cat terraform-iac/ambientes/dev/terraform.tfvars.backup
-          
-          echo -e "\n==== VERIFICANDO ARCHIVOS EN CARPETA DEV DESPUÉS DE CREAR BACKUP ===="
-          ls -la terraform-iac/ambientes/dev/
-
-      - name: Try Using Original or Backup File
-        id: varfile
-        run: |
-          cd terraform-iac
-          if [ -f "ambientes/dev/terraform.tfvars" ]; then
-            echo "VAR_FILE=ambientes/dev/terraform.tfvars" >> $GITHUB_OUTPUT
-            echo "Usando archivo original: ambientes/dev/terraform.tfvars"
-          else
-            echo "Archivo original no encontrado, usando backup"
-            cp ambientes/dev/terraform.tfvars.backup ambientes/dev/terraform.tfvars
-            echo "VAR_FILE=ambientes/dev/terraform.tfvars" >> $GITHUB_OUTPUT
-          fi
-
-      # Inicializar Terraform
-      - name: Terraform Init
-        id: init
-        run: |
-          cd terraform-iac
-          terraform init \
-            -backend-config="bucket=finaktiva-terraform-state-dev" \
-            -backend-config="key=terraform.tfstate" \
-            -backend-config="region=us-east-2" \
-            -backend-config="dynamodb_table=terraform-state-lock"
-
-      # Formatear código Terraform
-      - name: Terraform Format
-        id: fmt
-        run: cd terraform-iac && terraform fmt -check -recursive
-        continue-on-error: true
-
-      # Validar configuración de Terraform
-      - name: Terraform Validate
-        id: validate
-        run: cd terraform-iac && terraform validate
-
-      # Plan de Terraform usando el archivo identificado
-      - name: Terraform Plan
-        id: plan
-        if: github.event_name == 'pull_request' || github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
-        run: |
-          cd terraform-iac
-          ENV="${{ github.event.inputs.environment || 'dev' }}"
-          echo "Utilizando ambiente: $ENV"
-          echo "Verificando existencia del archivo de variables:"
-          ls -la ambientes/$ENV/terraform.tfvars || echo "Archivo no encontrado"
-          
-          echo "Ejecutando terraform plan con archivo: ${{ steps.varfile.outputs.VAR_FILE }}"
-          terraform plan -var-file="${{ steps.varfile.outputs.VAR_FILE }}" -out=tfplan || terraform plan -var-file="ambientes/$ENV/terraform.tfvars.backup" -out=tfplan
-
-      # El resto del workflow permanece igual...
-      - name: Update Pull Request
-        uses: actions/github-script@v6
-        if: github.event_name == 'pull_request'
-        env:
-          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" >> $GITHUB_ENV
+          echo "Ambiente: ${{ env.ENV }}"
+          echo "Región: ${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+      
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v2
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
-            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
-            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
-            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
-            
-            <details><summary>Mostrar Plan</summary>
-            
-            \`\`\`\n
-            ${process.env.PLAN}
-            \`\`\`
-            
-            </details>
-            
-            *Ejecutado por: @${{ github.actor }}, Acción: \`${{ github.event_name }}\`*`;
+          terraform_version: 1.4.6
+      
+      # PASO 1: Configurar buckets para Terraform state
+      - name: Crear y configurar buckets para Terraform state
+        run: |
+          # Definir la región correcta según el ambiente
+          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          
+          echo "=== Creando buckets para Terraform state ==="
+          
+          # Limpiar estados existentes si es necesario (ignorar errores)
+          aws s3 rm s3://finaktiva-terraform-state-dev/terraform.tfstate --region ${{ env.REGION_DEV }} || true
+          aws s3 rm s3://finaktiva-terraform-state-stg/terraform.tfstate --region ${{ env.REGION_DEV }} || true
+          aws s3 rm s3://finaktiva-terraform-state-prod/terraform.tfstate --region ${{ env.REGION_PROD }} || true
+          
+          # Crear buckets (ignorar errores si ya existen)
+          aws s3 mb s3://finaktiva-terraform-state-dev --region ${{ env.REGION_DEV }} || true
+          aws s3 mb s3://finaktiva-terraform-state-stg --region ${{ env.REGION_DEV }} || true
+          aws s3 mb s3://finaktiva-terraform-state-prod --region ${{ env.REGION_PROD }} || true
+          
+          # Habilitar versionado
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-dev --versioning-configuration Status=Enabled
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-stg --versioning-configuration Status=Enabled
+          aws s3api put-bucket-versioning --bucket finaktiva-terraform-state-prod --versioning-configuration Status=Enabled
+          
+          # Crear tabla DynamoDB para lock (ignorar errores si ya existe)
+          aws dynamodb create-table \
+              --table-name terraform-state-lock \
+              --attribute-definitions AttributeName=LockID,AttributeType=S \
+              --key-schema AttributeName=LockID,KeyType=HASH \
+              --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5 \
+              --region $REGION || true
               
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: output
-            })
-
-      - name: Terraform Apply
-        if: github.event.inputs.action == 'apply' && github.event_name == 'workflow_dispatch'
+          echo "=== Configuración de Terraform state completada ==="
+      
+      # PASO 2: Crear repositorios ECR
+      - name: Crear repositorios ECR
         run: |
-          cd terraform-iac
-          terraform apply -auto-approve tfplan
-
-      - name: Terraform Destroy
-        if: github.event.inputs.action == 'destroy' && github.event_name == 'workflow_dispatch'
+          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          
+          echo "=== Creando repositorios ECR ==="
+          
+          # Crear repositorios con nombres que coincidan con el módulo Terraform
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-app1 --force || true
+          aws ecr delete-repository --repository-name ${{ env.ENV }}-app2 --force || true
+          
+          aws ecr create-repository --repository-name ${{ env.ENV }}-app1 --region $REGION || true
+          aws ecr create-repository --repository-name ${{ env.ENV }}-app2 --region $REGION || true
+          
+          echo "=== Repositorios ECR creados correctamente ==="
+      
+      # PASO 3: Autenticar, construir y publicar imágenes Docker a ECR
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Autenticar en ECR
+        id: ecr-login
         run: |
-          cd terraform-iac
-          ENV="${{ github.event.inputs.environment }}"
-          terraform destroy -var-file="${{ steps.varfile.outputs.VAR_FILE }}" -auto-approve || terraform destroy -var-file="ambientes/$ENV/terraform.tfvars.backup" -auto-approve
+          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.$REGION.amazonaws.com
+      
+      - name: Construir y publicar imagen app1
+        uses: docker/build-push-action@v4
+        with:
+          context: ./apps/app1
+          push: true
+          tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}.amazonaws.com/${{ env.ENV }}-app1:latest
+      
+      - name: Construir y publicar imagen app2
+        uses: docker/build-push-action@v4
+        with:
+          context: ./apps/app2
+          push: true
+          tags: ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}.amazonaws.com/${{ env.ENV }}-app2:latest
+      
+      # PASO 4: Ejecutar Terraform
+      - name: Inicializar Terraform
+        working-directory: ./terraform
+        run: |
+          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          
+          terraform init \
+            -backend-config="bucket=finaktiva-terraform-state-${{ env.ENV }}" \
+            -backend-config="key=terraform.tfstate" \
+            -backend-config="region=$REGION" \
+            -backend-config="dynamodb_table=terraform-state-lock"
+      
+      - name: Plan de Terraform
+        working-directory: ./terraform
+        run: |
+          REGION="${{ env.ENV == 'prod' && env.REGION_PROD || env.REGION_DEV }}"
+          
+          terraform plan \
+            -var="environment=${{ env.ENV }}" \
+            -var="region=$REGION" \
+            -out=tfplan
+      
+      # Solo aplica en push a ramas principales o en dispatch manual, no en PRs
+      - name: Aplicar Terraform
+        if: github.event_name != 'pull_request'
+        working-directory: ./terraform
+        run: terraform apply -auto-approve tfplan
+      
+      - name: Notificar completado
+        run: echo "Pipeline completado exitosamente para ambiente ${{ env.ENV }}"
